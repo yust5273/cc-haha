@@ -31,48 +31,97 @@ import { feature } from 'bun:bundle';
 // 3. 所以这里把所有影响导入的环境变量设置，都放在文件最顶层
 // ============================================================================
 
-// Bug 修复：针对 corepack（Node.js 官方的包管理器自动管理工具）的问题
-// corepack 会自动在 package.json 中添加 yarnpkg 相关配置，某些情况下会导致问题
-// 通过设置环境变量 COREPACK_ENABLE_AUTO_PIN=0 来禁用自动固定包版本
-// 这是**顶层副作用**（模块加载时就执行），所以需要禁用 ESLint 规则
+// ============================================================================
+// 代码行: process.env.COREPACK_ENABLE_AUTO_PIN = '0';
+// ----------------------------------------------------------------------------
+// 作用: 禁用 corepack 的自动固定包版本功能
+// 含义: corepack 是 Node.js 官方内置的包管理器自动管理工具，它会自动
+//       在 package.json 中添加 "packageManager": "yarn@..." 字段来固定
+//       yarn 版本，某些情况下这种自动行为会导致问题
+// 为什么: 通过设置环境变量 COREPACK_ENABLE_AUTO_PIN=0 可以告诉 corepack
+//         不要自动添加/修改 package.json 中的包版本固定配置，避免冲突
+// 补充说明: 这是顶层副作用（模块加载时直接执行），所以需要禁用 ESLint 的
+//          自定义规则 "custom-rules/no-top-level-side-effects"
+// ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = '0';
 
-// 为 CCR 环境（Claude Code Remote，云端容器运行环境）设置 Node.js 最大堆内存
-// CCR 容器有 16GB 可用内存，所以设置 V8 堆的最大上限为 8192MB（即 8GB）
-// 同样：为什么放这里？因为 NODE_OPTIONS 影响子进程，必须尽早设置
+// ============================================================================
+// 代码块: if (process.env.CLAUDE_CODE_REMOTE === 'true') { ... }
+// ----------------------------------------------------------------------------
+// 作用: 针对 CCR 云端容器环境，增加 Node.js V8 堆内存上限
+// 含义: CCR = Claude Code Remote，是 Anthropic 官方的云端容器运行环境。
+//       CCR 给每个容器分配了 16GB 物理内存，我们需要告诉 V8 可以使用更多堆
+// 为什么: 默认情况下 Node.js 会根据系统可用内存自动计算一个较小的堆上限，
+//         在 CCR 环境下我们有 16GB，所以可以手动调高上限到 8GB，充分利用资源
+// 补充说明: 必须放这里 → NODE_OPTIONS 环境变量会被后续 spawn 的所有子进程继承，
+//          所以必须在产生任何子进程之前就设置好
+// ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level, custom-rules/safe-env-boolean-check
 if (process.env.CLAUDE_CODE_REMOTE === 'true') {
-  // 获取已有的 NODE_OPTIONS 环境变量，如果没有就是空字符串
+  // ==========================================================================
+  // 代码行: const existing = process.env.NODE_OPTIONS || '';
+  // --------------------------------------------------------------------------
+  // 作用: 获取系统已有的 NODE_OPTIONS 环境变量值
+  // 含义: process.env 是 Node.js 提供的全局对象，从操作系统环境读取环境变量。
+  //       如果用户已经设置了 NODE_OPTIONS，我们要保留用户的原有配置。
+  // 为什么: 我们只是追加参数，不是覆盖，这样用户原有的其他 Node.js 配置不会丢失
+  // 补充说明: 如果环境变量不存在，就是 undefined，用 || '' 给默认空字符串
+  // ==========================================================================
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   const existing = process.env.NODE_OPTIONS || '';
-  // 将 --max-old-space-size=8192 添加到 NODE_OPTIONS 中
-  // --max-old-space-size 是 V8/Node.js 的启动参数，设置老生代堆的最大大小，单位是 MB
+
+  // ==========================================================================
+  // 代码行: process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192';
+  // --------------------------------------------------------------------------
+  // 作用: 追加 --max-old-space-size=8192 到 NODE_OPTIONS
+  // 含义: --max-old-space-size 是 V8 引擎的启动参数，设置"老生代堆"的最大大小
+  //       单位是 MB，8192 就是 8192 MB = 8GB
+  // 为什么: CCR 容器有 16GB 总内存，给 V8 堆分配 8GB，预留另一半给系统、
+  //         子进程、其他模块，这样分配比较合理，不会 OOM
+  // 补充说明: 如果已有 NODE_OPTIONS 就追加，没有就直接新建一个
+  // ==========================================================================
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192';
 }
 
-// 实验性**基线对比（Ablation Baseline）**的设置：关闭各种功能得到最简版本，用于性能/效果对比实验
-// 【为什么要放在这里，而不是放到 init.ts 里面？】
-// 因为 BashTool/AgentTool/PowerShellTool 这些工具，会在**模块导入的时候**就读取
-// DISABLE_BACKGROUND_TASKS 等环境变量，并保存为**模块级常量**。如果放到 init() 里，
-// init() 运行太晚了，环境变量已经被读取完了，设置了也不生效。
-//
-// 【什么是 `feature()` + 构建时死代码消除？】
-// - `feature('FEATURE_NAME')` 是 Bun 提供的**构建时特性开关**
-// - 如果这个特性关闭，整个 `if` 代码块会在**构建打包的时候就被完全删掉**
-// - 最终产物里不会有这段代码，不占体积，不影响启动速度，这个技术叫「死代码消除（DCE - Dead Code Elimination）」
-// - 如果不用构建时死代码消除，就算特性关闭，代码也还在产物里，只是运行时不走分支，还是占体积
-//
-// 所以：不开启的功能，代码直接消失，所以不增加体积。
+// ============================================================================
+// 代码块: if (feature('ABLATION_BASELINE') && ...) { ... }
+// ----------------------------------------------------------------------------
+// 作用: 开启"基线对比实验模式"，关闭所有高级功能得到最简版本
+// 含义: Ablation Baseline（消融基线）是科研实验中的一种对比方法，通过关闭
+//       一个个高级功能，得到一个最简基线版本，用来对比性能和效果的差异。
+//       比如可以测试"记忆系统对回答质量提升多少"，就要有一个关闭记忆的基线。
+// 为什么: 必须放这里而不是放到后面的 init.ts → 因为很多工具模块在**导入时**
+//         就会读取 DISABLE_* 环境变量并存为模块级常量，如果放到 init() 里，
+//         init() 运行太晚了，模块已经导入完，环境变量已经被读走，设置了也不生效
+// 补充说明: feature('ABLATION_BASELINE') 是 Bun 的**构建时特性开关**:
+//          - 如果特性关闭，整个 if 代码块在构建时就被完全删除（死代码消除 DCE）
+//          - 最终打包产物里不会有这段代码，不占体积，不影响启动速度
+// ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
 if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
-  // 遍历这些环境变量，如果它们没有设置，就默认设为 '1'（开启关闭）
-  // 这些变量用来关闭各种高级功能，得到一个最简基线版本，用于科学实验对比
+  // 遍历需要设置的环境变量列表
+  // 每个环境变量对应关闭一个高级功能，全部设置后得到最简版本
   for (const k of ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_DISABLE_THINKING', 'DISABLE_INTERLEAVED_THINKING', 'DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS']) {
+    // =======================================================================
+    // 代码行: process.env[k] ??= '1';
+    // ----------------------------------------------------------------------
+    // 作用: 如果环境变量没有设置，默认设置为 '1'（表示功能关闭）
+    // 含义: ??= 是 JavaScript 的 Nullish 合并赋值运算符：只有当左侧变量
+    //       不存在（undefined）或为 null 时，才执行赋值。如果用户已经手动
+    //       设置过了（不管是 '0' 还是 '1'），就尊重用户的选择不覆盖
+    // 为什么: 1 表示开启这个"关闭功能"，也就是对应功能被禁用。这样默认全关，
+    //         用户可以手动设置某个变量为 0 来保留某个功能，做单变量消融实验。
+    // 补充说明: 这些环境变量控制关闭哪些高级功能：
+    //          - CLAUDE_CODE_SIMPLE: 极简模式，关闭很多非核心功能
+    //          - CLAUDE_CODE_DISABLE_THINKING: 禁用思考过程输出
+    //          - DISABLE_INTERLEAVED_THINKING: 禁用交错思考
+    //          - DISABLE_COMPACT / DISABLE_AUTO_COMPACT: 禁用上下文压缩
+    //          - CLAUDE_CODE_DISABLE_AUTO_MEMORY: 禁用自动记忆系统
+    //          - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: 禁用后台任务
+    // =======================================================================
     // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
-    // ??= 是 Nullish 合并赋值运算符：只有当 k 不存在或为 null/undefined 时，才赋值 '1'
-    // 如果用户已经手动设置了，尊重用户的设置
     process.env[k] ??= '1';
   }
 }
