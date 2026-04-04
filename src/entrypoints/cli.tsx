@@ -42,6 +42,7 @@ import { feature } from 'bun:bundle';
 //         不要自动添加/修改 package.json 中的包版本固定配置，避免冲突
 // 补充说明: 这是顶层副作用（模块加载时直接执行），所以需要禁用 ESLint 的
 //          自定义规则 "custom-rules/no-top-level-side-effects"
+// 设计亮点: 提前解决已知兼容性问题，避免用户遇到莫名其妙的构建错误 → 防患于未然
 // ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = '0';
@@ -56,6 +57,7 @@ process.env.COREPACK_ENABLE_AUTO_PIN = '0';
 //         在 CCR 环境下我们有 16GB，所以可以手动调高上限到 8GB，充分利用资源
 // 补充说明: 必须放这里 → NODE_OPTIONS 环境变量会被后续 spawn 的所有子进程继承，
 //          所以必须在产生任何子进程之前就设置好
+// 设计亮点: 按需配置资源，不影响本地开发，云端环境自动适配 → 不同环境不同策略
 // ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level, custom-rules/safe-env-boolean-check
 if (process.env.CLAUDE_CODE_REMOTE === 'true') {
@@ -67,6 +69,7 @@ if (process.env.CLAUDE_CODE_REMOTE === 'true') {
   //       如果用户已经设置了 NODE_OPTIONS，我们要保留用户的原有配置。
   // 为什么: 我们只是追加参数，不是覆盖，这样用户原有的其他 Node.js 配置不会丢失
   // 补充说明: 如果环境变量不存在，就是 undefined，用 || '' 给默认空字符串
+  // 设计亮点: 增量修改不覆盖，尊重用户原有配置 → 扩展性好，不破坏已有设置
   // ==========================================================================
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   const existing = process.env.NODE_OPTIONS || '';
@@ -80,6 +83,7 @@ if (process.env.CLAUDE_CODE_REMOTE === 'true') {
   // 为什么: CCR 容器有 16GB 总内存，给 V8 堆分配 8GB，预留另一半给系统、
   //         子进程、其他模块，这样分配比较合理，不会 OOM
   // 补充说明: 如果已有 NODE_OPTIONS 就追加，没有就直接新建一个
+  // 设计亮点: 合理内存分区，不浪费硬件资源，也避免溢出 → 工程化的资源分配
   // ==========================================================================
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192';
@@ -98,6 +102,11 @@ if (process.env.CLAUDE_CODE_REMOTE === 'true') {
 // 补充说明: feature('ABLATION_BASELINE') 是 Bun 的**构建时特性开关**:
 //          - 如果特性关闭，整个 if 代码块在构建时就被完全删除（死代码消除 DCE）
 //          - 最终打包产物里不会有这段代码，不占体积，不影响启动速度
+// 设计亮点: 构建时死代码消除 + 运行时环境变量开关 → 两级控制，既节省体积又灵活
+// ============================================================================
+// 第一层 feature() → 构建时判断：不开启实验代码就完全消失
+// 第二层 process.env → 运行时判断：代码保留但仍需用户环境变量开启才执行
+// 两个条件缺一不可，双重控制是设计精髓
 // ============================================================================
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
 if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
@@ -120,6 +129,8 @@ if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
     //          - DISABLE_COMPACT / DISABLE_AUTO_COMPACT: 禁用上下文压缩
     //          - CLAUDE_CODE_DISABLE_AUTO_MEMORY: 禁用自动记忆系统
     //          - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: 禁用后台任务
+    // 设计亮点: 默认全关方便一键出基线，用户可覆盖支持灵活实验 → 默认合理，
+    //          同时保留用户覆盖能力，方便做单变量消融分析
     // =======================================================================
     // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
     process.env[k] ??= '1';
