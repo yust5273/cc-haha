@@ -1,57 +1,181 @@
+// 从 Bun 的模块中导入 feature 函数
+// bun:bundle 是 Bun 特有的模块，提供**构建时特性开关**功能
+// feature() 用于判断某个功能是否开启，不开启的代码会在**构建时被删除**（这个技术叫 DCE - Dead Code Elimination 死代码消除）
 import { feature } from 'bun:bundle';
 
-// Bugfix for corepack auto-pinning, which adds yarnpkg to peoples' package.jsons
+// ============================================================================
+// 【设计思想】为什么这些环境变量设置要放在文件最顶层，而不是放到 main() 函数里？
+//
+// 核心问题：**模块在导入的时候，就会读取环境变量，保存为 const 常量**
+// 如果设置晚了，常量已经算出结果了，再改环境变量也没用！
+//
+// 错误示范 ❌ （设置晚了）：
+// ```javascript
+// // 先导入模块
+// import { someFunction } from './some-module.js';
+// // 再设置环境变量 → 太晚了！模块已经导入完了
+// process.env.CLAUDE_CODE_SIMPLE = '1';
+// ```
+//
+// 正确示范 ✅ （尽早设置）：
+// ```javascript
+// // 先设置环境变量
+// process.env.CLAUDE_CODE_SIMPLE = '1';
+// 再导入模块 → 模块导入时就能读到正确的值了
+// import { someFunction } from './some-module.js';
+// ```
+//
+// 所以规则：
+// 1. 如果环境变量会影响**模块导入时**的行为（比如模块顶层会读它存成常量），必须尽早设置
+// 2. 必须在导入那些会读取它的模块之前，就设置好
+// 3. 所以这里把所有影响导入的环境变量设置，都放在文件最顶层
+// ============================================================================
+
+// Bug 修复：针对 corepack（Node.js 官方的包管理器自动管理工具）的问题
+// corepack 会自动在 package.json 中添加 yarnpkg 相关配置，某些情况下会导致问题
+// 通过设置环境变量 COREPACK_ENABLE_AUTO_PIN=0 来禁用自动固定包版本
+// 这是**顶层副作用**（模块加载时就执行），所以需要禁用 ESLint 规则
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = '0';
 
-// Set max heap size for child processes in CCR environments (containers have 16GB)
+// 为 CCR 环境（Claude Code Remote，云端容器运行环境）设置 Node.js 最大堆内存
+// CCR 容器有 16GB 可用内存，所以设置 V8 堆的最大上限为 8192MB（即 8GB）
+// 同样：为什么放这里？因为 NODE_OPTIONS 影响子进程，必须尽早设置
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level, custom-rules/safe-env-boolean-check
 if (process.env.CLAUDE_CODE_REMOTE === 'true') {
+  // 获取已有的 NODE_OPTIONS 环境变量，如果没有就是空字符串
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   const existing = process.env.NODE_OPTIONS || '';
+  // 将 --max-old-space-size=8192 添加到 NODE_OPTIONS 中
+  // --max-old-space-size 是 V8/Node.js 的启动参数，设置老生代堆的最大大小，单位是 MB
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
   process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192';
 }
 
-// Harness-science L0 ablation baseline. Inlined here (not init.ts) because
-// BashTool/AgentTool/PowerShellTool capture DISABLE_BACKGROUND_TASKS into
-// module-level consts at import time — init() runs too late. feature() gate
-// DCEs this entire block from external builds.
+// 实验性**基线对比（Ablation Baseline）**的设置：关闭各种功能得到最简版本，用于性能/效果对比实验
+// 【为什么要放在这里，而不是放到 init.ts 里面？】
+// 因为 BashTool/AgentTool/PowerShellTool 这些工具，会在**模块导入的时候**就读取
+// DISABLE_BACKGROUND_TASKS 等环境变量，并保存为**模块级常量**。如果放到 init() 里，
+// init() 运行太晚了，环境变量已经被读取完了，设置了也不生效。
+//
+// 【什么是 `feature()` + 构建时死代码消除？】
+// - `feature('FEATURE_NAME')` 是 Bun 提供的**构建时特性开关**
+// - 如果这个特性关闭，整个 `if` 代码块会在**构建打包的时候就被完全删掉**
+// - 最终产物里不会有这段代码，不占体积，不影响启动速度，这个技术叫「死代码消除（DCE - Dead Code Elimination）」
+// - 如果不用构建时死代码消除，就算特性关闭，代码也还在产物里，只是运行时不走分支，还是占体积
+//
+// 所以：不开启的功能，代码直接消失，所以不增加体积。
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
 if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
+  // 遍历这些环境变量，如果它们没有设置，就默认设为 '1'（开启关闭）
+  // 这些变量用来关闭各种高级功能，得到一个最简基线版本，用于科学实验对比
   for (const k of ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_DISABLE_THINKING', 'DISABLE_INTERLEAVED_THINKING', 'DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS']) {
     // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
+    // ??= 是 Nullish 合并赋值运算符：只有当 k 不存在或为 null/undefined 时，才赋值 '1'
+    // 如果用户已经手动设置了，尊重用户的设置
     process.env[k] ??= '1';
   }
 }
 
 /**
- * Bootstrap entrypoint - checks for special flags before loading the full CLI.
- * All imports are dynamic to minimize module evaluation for fast paths.
- * Fast-path for --version has zero imports beyond this file.
+ * ============================================================================
+ * 【整体设计思想】Bootstrap 入口点 - 做「快速路径预处理」
+ *
+ * 核心设计原则：**尽早处理特殊情况，不加载无用代码，让常见路径更快**
+ *
+ * 什么是「快速路径分流」？
+ * ---------------------
+ * 不是说「快速路径一定是执行完就退出」，而是：
+ * > 在进入完整交互式 TUI 之前，先判断是不是特殊情况，如果是特殊情况
+ * > 就在这里处理，**不加载完整 TUI 代码**，节省时间
+ *
+ * 快速路径有几种情况：
+ *  1. 一次性命令（执行完就退出）：`--version`、`ps`、`logs`、`kill`
+ *  2. 启动独立后台服务（长期运行，但不需要 TUI）：`daemon`、`remote-control`、`--computer-use-mcp`
+ *  3. 直接 exec 替换进程（原进程结束，不会继续往下走）：`--worktree --tmux`
+ *
+ * 为什么要这么设计？
+ * -----------------
+ * 1. 完整的 `main.tsx` 有 8000 行代码，加载解析都需要时间
+ * 2. 如果每次都要加载整个 main.tsx 才判断命令类型，简单命令启动也会很慢
+ * 3. 所以这里做「前置分流」：特殊命令在这里就处理完，不加载完整 CLI
+ * 4. 只有正常交互式使用才需要加载完整 TUI
+ *
+ * 为什么所有导入都是 `await import()` 动态导入？
+ * -------------------------------------------
+ * 什么是「静态导入」：
+ *  ```javascript
+ *  // ❌ 写在文件顶层，不管用不用，启动的时候全部都加载了
+ *  import { runDaemonWorker } from '../daemon/workerRegistry.js';
+ *  import { bridgeMain } from '../bridge/bridgeMain.js';
+ *  ```
+ * 什么是「按需动态导入」：
+ *  ```javascript
+ *  // ✅ 只有真走到这个分支，才会加载模块，不进分支永远不加载
+ *  if (args[0] === '--daemon-worker') {
+ *    const { runDaemonWorker } = await import('../daemon/workerRegistry.js');
+ *    await runDaemonWorker(args[1]);
+ *  }
+ *  ```
+ *
+ * 为什么在这里用动态导入：
+ *  - 这个文件有 20+ 个分支，但用户一次只能走一个分支
+ *  - 按需加载：只用哪个分支，就只加载哪个分支需要的模块
+ *  - 不用的分支，模块躺在硬盘上，根本不会读，节省时间
+ *  - 比如用户只运行 `claude --version`，只需要本文件，不需要加载任何其他模块
+ *  - 这样「快速路径」真的很快，零额外依赖，毫秒级响应
+ *  - 如果用静态导入，不管走不走这个分支，所有模块都要加载，浪费时间
+ *
+ * fast-path for --version：真·零模块加载，只在本文件完成
+ *  - MACRO.VERSION 是**构建时内联**进去的，所以不需要任何导入就能输出
+ * ============================================================================
  */
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
 
-  // Fast-path for --version/-v: zero module loading needed
+// 定义异步 main 函数，整个启动逻辑在这里
+async function main(): Promise<void> {
+  // process.argv 是 Node.js 进程收到的命令行参数数组：
+  // - process.argv[0] = Node.js 可执行文件的绝对路径
+  // - process.argv[1] = 当前正在执行的脚本文件（cli.tsx）的绝对路径
+  // - 所以从索引 2 开始，才是用户真正传给程序的参数
+  const args = process.argv.slice(2);
+  console.log(`[cli] 进入 cli main 函数，参数: ${JSON.stringify(args)}`);
+
+  // --------------------------------------------------------------------------
+  // 快速路径 1：处理 --version/-v/-v：直接输出版本号然后退出
+  // 【设计优化】这个路径不需要加载任何其他模块，**零导入**，非常快
+  // 用户输入 `claude --version` 就能马上得到结果，不需要等半天加载整个应用
+  // --------------------------------------------------------------------------
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-v' || args[0] === '-V')) {
-    // MACRO.VERSION is inlined at build time
-    // biome-ignore lint/suspicious/noConsole:: intentional console output
+    console.log('[cli] 快速路径 --version，输出版本号后退出');
+    // MACRO.VERSION 是构建时（打包的时候）就被编译器内联成具体的版本号了
+    // biome-ignore lint/suspicious/noConsole：这是故意输出到控制台，所以忽略规则
     console.log(`${MACRO.VERSION} (Claude Code)`);
+    // 直接返回，main 函数结束，进程自然退出
     return;
   }
 
-  // For all other paths, load the startup profiler
+  // --------------------------------------------------------------------------
+  // 走到这里说明不是 --version，需要加载启动性能分析工具
+  // profileCheckpoint 用来记录每个阶段的开始时间，用于**分析启动瓶颈**
+  // 产品开发中可以看每个阶段花了多少时间，针对性优化
+  // --------------------------------------------------------------------------
+  console.log('[cli] 加载启动性能分析工具');
   const {
     profileCheckpoint
   } = await import('../utils/startupProfiler.js');
+  // 记录进入 cli 入口点这个时间点
   profileCheckpoint('cli_entry');
+  console.log('[cli] 记录检查点: cli_entry');
 
-  // Fast-path for --dump-system-prompt: output the rendered system prompt and exit.
-  // Used by prompt sensitivity evals to extract the system prompt at a specific commit.
-  // Ant-only: eliminated from external builds via feature flag.
+  // --------------------------------------------------------------------------
+  // 快速路径 2：--dump-system-prompt：输出生成好的系统提示词然后退出
+  // 用途：Anthropic 内部做「提示词敏感性评估」实验，在特定 commit 提取当前系统提示词
+  // 【设计】通过 feature 开关，外部构建根本不会包含这段代码
+  // --------------------------------------------------------------------------
   if (feature('DUMP_SYSTEM_PROMPT') && args[0] === '--dump-system-prompt') {
+    console.log('[cli] 快速路径 --dump-system-prompt');
     profileCheckpoint('cli_dump_system_prompt_path');
+    // 只动态加载需要的模块，不加载没用的
     const {
       enableConfigs
     } = await import('../utils/config.js');
@@ -59,31 +183,47 @@ async function main(): Promise<void> {
     const {
       getMainLoopModel
     } = await import('../utils/model/model.js');
+    // 支持用户指定 --model 参数，不同模型系统提示词可能不一样
     const modelIdx = args.indexOf('--model');
     const model = modelIdx !== -1 && args[modelIdx + 1] || getMainLoopModel();
     const {
       getSystemPrompt
     } = await import('../constants/prompts.js');
     const prompt = await getSystemPrompt([], model);
-    // biome-ignore lint/suspicious/noConsole:: intentional console output
+    // biome-ignore lint/suspicious/noConsole：故意输出
     console.log(prompt.join('\n'));
     return;
   }
+
+  // --------------------------------------------------------------------------
+  // 快速路径 3：各种独立 MCP 服务器模式
+  // MCP = Model Context Protocol，Anthropic 的工具服务协议
+  // 这些都是独立的服务器进程，不需要完整 TUI，所以在这里快速启动
+  // --------------------------------------------------------------------------
+
+  // 启动 Claude in Chrome 的 MCP 服务器：Chrome 扩展和本地 Claude 通信
   if (process.argv[2] === '--claude-in-chrome-mcp') {
+    console.log('[cli] 快速路径 --claude-in-chrome-mcp');
     profileCheckpoint('cli_claude_in_chrome_mcp_path');
     const {
       runClaudeInChromeMcpServer
     } = await import('../utils/claudeInChrome/mcpServer.js');
     await runClaudeInChromeMcpServer();
     return;
-  } else if (process.argv[2] === '--chrome-native-host') {
+  }
+  // 启动 Chrome 原生消息宿主：Chrome 扩展通过原生消息和本地程序通信
+  else if (process.argv[2] === '--chrome-native-host') {
+    console.log('[cli] 快速路径 --chrome-native-host');
     profileCheckpoint('cli_chrome_native_host_path');
     const {
       runChromeNativeHost
     } = await import('../utils/claudeInChrome/chromeNativeHost.js');
     await runChromeNativeHost();
     return;
-  } else if (process.argv[2] === '--computer-use-mcp') {
+  }
+  // 启动 Computer Use（桌面控制）独立 MCP 服务器
+  else if (process.argv[2] === '--computer-use-mcp') {
+    console.log('[cli] 快速路径 --computer-use-mcp');
     profileCheckpoint('cli_computer_use_mcp_path');
     const {
       runComputerUseMcpServer
@@ -92,24 +232,31 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Fast-path for `--daemon-worker=<kind>` (internal — supervisor spawns this).
-  // Must come before the daemon subcommand check: spawned per-worker, so
-  // perf-sensitive. No enableConfigs(), no analytics sinks at this layer —
-  // workers are lean. If a worker kind needs configs/auth (assistant will),
-  // it calls them inside its run() fn.
+  // --------------------------------------------------------------------------
+  // 快速路径 4：--daemon-worker（内部用途，由 supervisor 生成工作进程）
+  // 【设计注意点】
+  // - 必须放在 daemon 子命令检查之前：因为每个 worker 是单独 spawn 出来的，对性能敏感
+  // - 这里不做 enableConfigs()、不初始化分析日志：worker 要保持精简，越快越好
+  // - 如果某个 worker 类型确实需要配置和认证，它自己会在 run() 里面调用
+  // --------------------------------------------------------------------------
   if (feature('DAEMON') && args[0] === '--daemon-worker') {
+    console.log('[cli] 快速路径 --daemon-worker');
     const {
       runDaemonWorker
     } = await import('../daemon/workerRegistry.js');
+    // args[1] 就是 worker 类型参数，直接传进去
     await runDaemonWorker(args[1]);
     return;
   }
 
-  // Fast-path for `claude remote-control` (also accepts legacy `claude remote` / `claude sync` / `claude bridge`):
-  // serve local machine as bridge environment.
-  // feature() must stay inline for build-time dead code elimination;
-  // isBridgeEnabled() checks the runtime GrowthBook gate.
+  // --------------------------------------------------------------------------
+  // 快速路径 5：claude remote-control 命令（远程控制本地机器）
+  // 也兼容旧名称：remote / sync / bridge，兼容老用户习惯
+  // 【设计】feature() 必须保持内联写在这里，这样构建时才能做死代码消除
+  // 运行时还要通过 GrowthBook 检查开关是否开启
+  // --------------------------------------------------------------------------
   if (feature('BRIDGE_MODE') && (args[0] === 'remote-control' || args[0] === 'rc' || args[0] === 'remote' || args[0] === 'sync' || args[0] === 'bridge')) {
+    console.log('[cli] 快速路径 remote-control/bridge');
     profileCheckpoint('cli_bridge_path');
     const {
       enableConfigs
@@ -129,40 +276,51 @@ async function main(): Promise<void> {
       exitWithError
     } = await import('../utils/process.js');
 
-    // Auth check must come before the GrowthBook gate check — without auth,
-    // GrowthBook has no user context and would return a stale/default false.
-    // getBridgeDisabledReason awaits GB init, so the returned value is fresh
-    // (not the stale disk cache), but init still needs auth headers to work.
+    // 【为什么认证检查必须放在 GrowthBook 开关检查之前？】
+    // 因为：没有认证的话，GrowthBook（功能开关服务）没有用户上下文
+    // 就会返回**过期的默认值 false**，而不是最新的开关状态
+    // getBridgeDisabledReason() 需要等待 GrowthBook 初始化完成，所以返回的是最新结果
+    // 但 GrowthBook 初始化本身需要认证头才能工作，所以必须先拿认证
     const {
       getClaudeAIOAuthTokens
     } = await import('../utils/auth.js');
+    // 如果没有访问令牌，输出错误直接退出
     if (!getClaudeAIOAuthTokens()?.accessToken) {
       exitWithError(BRIDGE_LOGIN_ERROR);
     }
+    // 检查桥接模式是否被管理员禁用，如果禁用输出错误退出
     const disabledReason = await getBridgeDisabledReason();
     if (disabledReason) {
       exitWithError(`Error: ${disabledReason}`);
     }
+    // 检查是否满足最小版本要求，不满足就退出
     const versionError = checkBridgeMinVersion();
     if (versionError) {
       exitWithError(versionError);
     }
 
-    // Bridge is a remote control feature - check policy limits
+    // 桥接是远程控制功能，需要检查企业策略限制
     const {
       waitForPolicyLimitsToLoad,
       isPolicyAllowed
     } = await import('../services/policyLimits/index.js');
+    // 等待策略限制信息加载完成
     await waitForPolicyLimitsToLoad();
+    // 检查策略是否允许远程控制，不允许就退出
     if (!isPolicyAllowed('allow_remote_control')) {
       exitWithError("Error: Remote Control is disabled by your organization's policy.");
     }
+    // 进入桥接模式主函数，参数去掉第一个子命令名称
     await bridgeMain(args.slice(1));
     return;
   }
 
-  // Fast-path for `claude daemon [subcommand]`: long-running supervisor.
+  // --------------------------------------------------------------------------
+  // 快速路径 6：claude daemon [subcommand] - 启动长期运行的守护进程管理器
+  // 守护进程管理后台任务和后台会话
+  // --------------------------------------------------------------------------
   if (feature('DAEMON') && args[0] === 'daemon') {
+    console.log('[cli] 快速路径 daemon');
     profileCheckpoint('cli_daemon_path');
     const {
       enableConfigs
@@ -171,59 +329,81 @@ async function main(): Promise<void> {
     const {
       initSinks
     } = await import('../utils/sinks.js');
+    // 初始化日志接收器（日志输出目的地）
     initSinks();
     const {
       daemonMain
     } = await import('../daemon/main.js');
+    // 进入守护进程主函数
     await daemonMain(args.slice(1));
     return;
   }
 
-  // Fast-path for `claude ps|logs|attach|kill` and `--bg`/`--background`.
-  // Session management against the ~/.claude/sessions/ registry. Flag
-  // literals are inlined so bg.js only loads when actually dispatching.
+  // --------------------------------------------------------------------------
+  // 快速路径 7：后台会话管理命令：ps / logs / attach / kill，以及 --bg / --background 标志
+  // 管理 ~/.claude/sessions/ 目录下注册的后台会话
+  // 【设计】这里就内联判断标志，这样只有真正用到这些功能才加载 bg.js 模块
+  // 如果用户不是这些命令，bg.js 根本不会被加载，节省时间
+  // --------------------------------------------------------------------------
   if (feature('BG_SESSIONS') && (args[0] === 'ps' || args[0] === 'logs' || args[0] === 'attach' || args[0] === 'kill' || args.includes('--bg') || args.includes('--background'))) {
+    console.log(`[cli] 快速路径 bg 命令: ${args[0]}`);
     profileCheckpoint('cli_bg_path');
     const {
       enableConfigs
     } = await import('../utils/config.js');
     enableConfigs();
+    // 只有走到这个分支才动态加载 bg.js
     const bg = await import('../cli/bg.js');
+    // 根据子命令分发到不同处理函数
     switch (args[0]) {
       case 'ps':
+        // 列出所有后台会话
         await bg.psHandler(args.slice(1));
         break;
       case 'logs':
+        // 查看指定会话的日志
         await bg.logsHandler(args[1]);
         break;
       case 'attach':
+        // 附加（attach）到正在运行的会话，进入交互模式
         await bg.attachHandler(args[1]);
         break;
       case 'kill':
+        // 终止指定后台会话
         await bg.killHandler(args[1]);
         break;
       default:
+        // 其他情况：参数里有 --bg 或 --background，处理后台标志
         await bg.handleBgFlag(args);
     }
     return;
   }
 
-  // Fast-path for template job commands.
+  // --------------------------------------------------------------------------
+  // 快速路径 8：模板 job 命令：new / list / reply
+  // --------------------------------------------------------------------------
   if (feature('TEMPLATES') && (args[0] === 'new' || args[0] === 'list' || args[0] === 'reply')) {
+    console.log(`[cli] 快速路径 templates 命令: ${args[0]}`);
     profileCheckpoint('cli_templates_path');
     const {
       templatesMain
     } = await import('../cli/handlers/templateJobs.js');
     await templatesMain(args);
-    // process.exit (not return) — mountFleetView's Ink TUI can leave event
-    // loop handles that prevent natural exit.
+    // 为什么这里用 process.exit(0) 而不是直接 return？
+    // 因为 mountFleetView 的 Ink TUI 渲染会留下事件循环句柄
+    // 这些句柄会阻止 Node.js 自然退出，程序卡着不结束
+    // 所以直接调用 process.exit(0) 干净利落地退出
     // eslint-disable-next-line custom-rules/no-process-exit
     process.exit(0);
   }
 
-  // Fast-path for `claude environment-runner`: headless BYOC runner.
-  // feature() must stay inline for build-time dead code elimination.
+  // --------------------------------------------------------------------------
+  // 快速路径 9：claude environment-runner - 无头（headless）BYOC 运行器
+  // BYOC = Bring Your Own Container，用户自带容器环境运行
+  // feature() 必须内联，才能让构建时做死代码消除
+  // --------------------------------------------------------------------------
   if (feature('BYOC_ENVIRONMENT_RUNNER') && args[0] === 'environment-runner') {
+    console.log('[cli] 快速路径 environment-runner');
     profileCheckpoint('cli_environment_runner_path');
     const {
       environmentRunnerMain
@@ -232,10 +412,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Fast-path for `claude self-hosted-runner`: headless self-hosted-runner
-  // targeting the SelfHostedRunnerWorkerService API (register + poll; poll IS
-  // heartbeat). feature() must stay inline for build-time dead code elimination.
+  // --------------------------------------------------------------------------
+  // 快速路径 10：claude self-hosted-runner - 自托管运行器
+  // 对接 SelfHostedRunnerWorkerService API：注册 + 轮询，轮询就是保持心跳
+  // --------------------------------------------------------------------------
   if (feature('SELF_HOSTED_RUNNER') && args[0] === 'self-hosted-runner') {
+    console.log('[cli] 快速路径 self-hosted-runner');
     profileCheckpoint('cli_self_hosted_runner_path');
     const {
       selfHostedRunnerMain
@@ -244,9 +426,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Fast-path for --worktree --tmux: exec into tmux before loading full CLI
+  // --------------------------------------------------------------------------
+  // 快速路径 11：--worktree + --tmux 组合：在加载完整 CLI 之前，先 exec 进入 tmux
+  // Git worktree：Git 特性，可以同时检出多个分支到不同目录
+  // Claude Code worktree 特性：在新的 Git worktree 中打开新会话
+  // 结合 tmux：可以自动在新 tmux 窗口中打开 Claude Code 会话
+  // 【设计】为什么要在这里提前处理？因为 exec 就要替换进程，不需要加载完整 CLI 了
+  // --------------------------------------------------------------------------
   const hasTmuxFlag = args.includes('--tmux') || args.includes('--tmux=classic');
+  // 检查参数里是否有 worktree 相关选项：-w / --worktree / --worktree=xxx
   if (hasTmuxFlag && (args.includes('-w') || args.includes('--worktree') || args.some(a => a.startsWith('--worktree=')))) {
+    console.log('[cli] 快速路径 tmux + worktree');
     profileCheckpoint('cli_tmux_worktree_fast_path');
     const {
       enableConfigs
@@ -255,49 +445,91 @@ async function main(): Promise<void> {
     const {
       isWorktreeModeEnabled
     } = await import('../utils/worktreeModeEnabled.js');
+    // 如果 worktree 模式启用了，才处理
     if (isWorktreeModeEnabled()) {
       const {
         execIntoTmuxWorktree
       } = await import('../utils/worktree.js');
+      // 尝试执行进入 tmux + worktree 的操作
       const result = await execIntoTmuxWorktree(args);
+      // 如果已经处理成功，exec 会替换当前进程，原进程就结束了
+      // 如果能走到这里返回说明没处理，继续往下走
       if (result.handled) {
         return;
       }
-      // If not handled (e.g., error), fall through to normal CLI
+      // 如果没处理而且有错误信息，输出错误然后退出
       if (result.error) {
         const {
           exitWithError
         } = await import('../utils/process.js');
         exitWithError(result.error);
       }
+      // 没错误就回落到正常 CLI
     }
+    // 如果 worktree 模式没启用，也回落到正常 CLI
   }
 
-  // Redirect common update flag mistakes to the update subcommand
+  // --------------------------------------------------------------------------
+  // 用户体验优化：自动纠正用户常见错误
+  // 用户想更新的时候，习惯输入 `claude --update` 或 `claude --upgrade`（带两个横线）
+  // 但实际上正确命令是 `claude update`（子命令，不带横线）
+  // 我们识别出来用户意图，自动改成正确参数，用户不用重新输入，提升体验
+  // --------------------------------------------------------------------------
   if (args.length === 1 && (args[0] === '--update' || args[0] === '--upgrade')) {
+    console.log('[cli] 自动纠正参数: --update → update');
+    // 直接修改 process.argv，把第三个参数改成 'update'
+    // 后面的主 CLI 解析就会正确识别为 update 子命令
     process.argv = [process.argv[0]!, process.argv[1]!, 'update'];
   }
 
-  // --bare: set SIMPLE early so gates fire during module eval / commander
-  // option building (not just inside the action handler).
+  // --------------------------------------------------------------------------
+  // --bare 标志：开启极简模式 CLAUDE_CODE_SIMPLE
+  // 【为什么要在这里提前设置，不能在 main.tsx 里设置？】
+  // 因为很多功能开关在**模块导入的时候**就会读取这个环境变量
+  // 如果加载完模块才设置，已经太晚了，开关已经判断完了，不生效
+  // 所以必须在导入 main.tsx 之前就设置好，保证所有模块都能读到正确的值
+  // --------------------------------------------------------------------------
   if (args.includes('--bare')) {
+    console.log('[cli] 检测到 --bare 标志，开启极简模式 CLAUDE_CODE_SIMPLE=1');
     process.env.CLAUDE_CODE_SIMPLE = '1';
   }
 
-  // No special flags detected, load and run the full CLI
+  // --------------------------------------------------------------------------
+  // 【走到这里说明】没有检测到任何特殊命令，是正常启动完整交互式 CLI
+  // 现在可以加载并运行完整的 main.tsx 了
+  // --------------------------------------------------------------------------
+  console.log('[cli] 没有匹配到快速路径，准备启动完整交互式 CLI');
+
+  // 提前开始捕获用户的早期输入
+  // 为什么需要？因为加载完整 CLI 需要一点时间，用户可能已经在键盘输入了
+  // 如果不提前捕获，这些输入会丢失
+  console.log('[cli] 导入 earlyInput 模块，开始捕获早期输入');
   const {
     startCapturingEarlyInput
   } = await import('../utils/earlyInput.js');
   startCapturingEarlyInput();
+
+  // 记录检查点：开始导入 main 模块之前
   profileCheckpoint('cli_before_main_import');
+  console.log('[cli] 记录检查点: cli_before_main_import，开始导入 main.tsx');
+  // 动态导入完整 CLI 主模块，它导出的 main 函数我们叫 cliMain
   const {
     main: cliMain
   } = await import('../main.js');
+  // 记录检查点：导入完成
   profileCheckpoint('cli_after_main_import');
+  console.log('[cli] main.tsx 导入完成，记录检查点: cli_after_main_import');
+  // 调用完整 CLI 主函数，等待它执行完成
+  console.log('[cli] 调用完整 CLI 主函数 cliMain()');
   await cliMain();
+  // 记录检查点：主函数执行完成
   profileCheckpoint('cli_after_main_complete');
+  console.log('[cli] cliMain 执行完成，记录检查点: cli_after_main_complete');
 }
 
+// 调用 main 函数开始执行整个流程
+// void 表示我们不关心返回的 Promise，忽略它（TypeScript 需要这样写）
+// 这是顶层副作用，所以禁用 ESLint 的规则
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 void main();
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6WyJmZWF0dXJlIiwicHJvY2VzcyIsImVudiIsIkNPUkVQQUNLX0VOQUJMRV9BVVRPX1BJTiIsIkNMQVVERV9DT0RFX1JFTU9URSIsImV4aXN0aW5nIiwiTk9ERV9PUFRJT05TIiwiQ0xBVURFX0NPREVfQUJMQVRJT05fQkFTRUxJTkUiLCJrIiwibWFpbiIsIlByb21pc2UiLCJhcmdzIiwiYXJndiIsInNsaWNlIiwibGVuZ3RoIiwiY29uc29sZSIsImxvZyIsIk1BQ1JPIiwiVkVSU0lPTiIsInByb2ZpbGVDaGVja3BvaW50IiwiZW5hYmxlQ29uZmlncyIsImdldE1haW5Mb29wTW9kZWwiLCJtb2RlbElkeCIsImluZGV4T2YiLCJtb2RlbCIsImdldFN5c3RlbVByb21wdCIsInByb21wdCIsImpvaW4iLCJydW5DbGF1ZGVJbkNocm9tZU1jcFNlcnZlciIsInJ1bkNocm9tZU5hdGl2ZUhvc3QiLCJydW5Db21wdXRlclVzZU1jcFNlcnZlciIsInJ1bkRhZW1vbldvcmtlciIsImdldEJyaWRnZURpc2FibGVkUmVhc29uIiwiY2hlY2tCcmlkZ2VNaW5WZXJzaW9uIiwiQlJJREdFX0xPR0lOX0VSUk9SIiwiYnJpZGdlTWFpbiIsImV4aXRXaXRoRXJyb3IiLCJnZXRDbGF1ZGVBSU9BdXRoVG9rZW5zIiwiYWNjZXNzVG9rZW4iLCJkaXNhYmxlZFJlYXNvbiIsInZlcnNpb25FcnJvciIsIndhaXRGb3JQb2xpY3lMaW1pdHNUb0xvYWQiLCJpc1BvbGljeUFsbG93ZWQiLCJpbml0U2lua3MiLCJkYWVtb25NYWluIiwiaW5jbHVkZXMiLCJiZyIsInBzSGFuZGxlciIsImxvZ3NIYW5kbGVyIiwiYXR0YWNoSGFuZGxlciIsImtpbGxIYW5kbGVyIiwiaGFuZGxlQmdGbGFnIiwidGVtcGxhdGVzTWFpbiIsImV4aXQiLCJlbnZpcm9ubWVudFJ1bm5lck1haW4iLCJzZWxmSG9zdGVkUnVubmVyTWFpbiIsImhhc1RtdXhGbGFnIiwic29tZSIsImEiLCJzdGFydHNXaXRoIiwiaXNXb3JrdHJlZU1vZGVFbmFibGVkIiwiZXhlY0ludG9UbXV4V29ya3RyZWUiLCJyZXN1bHQiLCJoYW5kbGVkIiwiZXJyb3IiLCJDTEFVREVfQ09ERV9TSU1QTEUiLCJzdGFydENhcHR1cmluZ0Vhcmx5SW5wdXQiLCJjbGlNYWluIl0sInNvdXJjZXMiOlsiY2xpLnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyBmZWF0dXJlIH0gZnJvbSAnYnVuOmJ1bmRsZSdcblxuLy8gQnVnZml4IGZvciBjb3JlcGFjayBhdXRvLXBpbm5pbmcsIHdoaWNoIGFkZHMgeWFybnBrZyB0byBwZW9wbGVzJyBwYWNrYWdlLmpzb25zXG4vLyBlc2xpbnQtZGlzYWJsZS1uZXh0LWxpbmUgY3VzdG9tLXJ1bGVzL25vLXRvcC1sZXZlbC1zaWRlLWVmZmVjdHNcbnByb2Nlc3MuZW52LkNPUkVQQUNLX0VOQUJMRV9BVVRPX1BJTiA9ICcwJ1xuXG4vLyBTZXQgbWF4IGhlYXAgc2l6ZSBmb3IgY2hpbGQgcHJvY2Vzc2VzIGluIENDUiBlbnZpcm9ubWVudHMgKGNvbnRhaW5lcnMgaGF2ZSAxNkdCKVxuLy8gZXNsaW50LWRpc2FibGUtbmV4dC1saW5lIGN1c3RvbS1ydWxlcy9uby10b3AtbGV2ZWwtc2lkZS1lZmZlY3RzLCBjdXN0b20tcnVsZXMvbm8tcHJvY2Vzcy1lbnYtdG9wLWxldmVsLCBjdXN0b20tcnVsZXMvc2FmZS1lbnYtYm9vbGVhbi1jaGVja1xuaWYgKHByb2Nlc3MuZW52LkNMQVVERV9DT0RFX1JFTU9URSA9PT0gJ3RydWUnKSB7XG4gIC8vIGVzbGludC1kaXNhYmxlLW5leHQtbGluZSBjdXN0b20tcnVsZXMvbm8tdG9wLWxldmVsLXNpZGUtZWZmZWN0cywgY3VzdG9tLXJ1bGVzL25vLXByb2Nlc3MtZW52LXRvcC1sZXZlbFxuICBjb25zdCBleGlzdGluZyA9IHByb2Nlc3MuZW52Lk5PREVfT1BUSU9OUyB8fCAnJ1xuICAvLyBlc2xpbnQtZGlzYWJsZS1uZXh0LWxpbmUgY3VzdG9tLXJ1bGVzL25vLXRvcC1sZXZlbC1zaWRlLWVmZmVjdHMsIGN1c3RvbS1ydWxlcy9uby1wcm9jZXNzLWVudi10b3AtbGV2ZWxcbiAgcHJvY2Vzcy5lbnYuTk9ERV9PUFRJT05TID0gZXhpc3RpbmdcbiAgICA/IGAke2V4aXN0aW5nfSAtLW1heC1vbGQtc3BhY2Utc2l6ZT04MTkyYFxuICAgIDogJy0tbWF4LW9sZC1zcGFjZS1zaXplPTgxOTInXG59XG5cbi8vIEhhcm5lc3Mtc2NpZW5jZSBMMCBhYmxhdGlvbiBiYXNlbGluZS4gSW5saW5lZCBoZXJlIChub3QgaW5pdC50cykgYmVjYXVzZVxuLy8gQmFzaFRvb2wvQWdlbnRUb29sL1Bvd2VyU2hlbGxUb29sIGNhcHR1cmUgRElTQUJMRV9CQUNLR1JPVU5EX1RBU0tTIGludG9cbi8vIG1vZHVsZS1sZXZlbCBjb25zdHMgYXQgaW1wb3J0IHRpbWUg4oCUIGluaXQoKSBydW5zIHRvbyBsYXRlLiBmZWF0dXJlKCkgZ2F0ZVxuLy8gRENFcyB0aGlzIGVudGlyZSBibG9jayBmcm9tIGV4dGVybmFsIGJ1aWxkcy5cbi8vIGVzbGludC1kaXNhYmxlLW5leHQtbGluZSBjdXN0b20tcnVsZXMvbm8tdG9wLWxldmVsLXNpZGUtZWZmZWN0cywgY3VzdG9tLXJ1bGVzL25vLXByb2Nlc3MtZW52LXRvcC1sZXZlbFxuaWYgKGZlYXR1cmUoJ0FCTEFUSU9OX0JBU0VMSU5FJykgJiYgcHJvY2Vzcy5lbnYuQ0xBVURFX0NPREVfQUJMQVRJT05fQkFTRUxJTkUpIHtcbiAgZm9yIChjb25zdCBrIG9mIFtcbiAgICAnQ0xBVURFX0NPREVfU0lNUExFJyxcbiAgICAnQ0xBVURFX0NPREVfRElTQUJMRV9USElOS0lORycsXG4gICAgJ0RJU0FCTEVfSU5URVJMRUFWRURfVEhJTktJTkcnLFxuICAgICdESVNBQkxFX0NPTVBBQ1QnLFxuICAgICdESVNBQkxFX0FVVE9fQ09NUEFDVCcsXG4gICAgJ0NMQVVERV9DT0RFX0RJU0FCTEVfQVVUT19NRU1PUlknLFxuICAgICdDTEFVREVfQ09ERV9ESVNBQkxFX0JBQ0tHUk9VTkRfVEFTS1MnLFxuICBdKSB7XG4gICAgLy8gZXNsaW50LWRpc2FibGUtbmV4dC1saW5lIGN1c3RvbS1ydWxlcy9uby10b3AtbGV2ZWwtc2lkZS1lZmZlY3RzLCBjdXN0b20tcnVsZXMvbm8tcHJvY2Vzcy1lbnYtdG9wLWxldmVsXG4gICAgcHJvY2Vzcy5lbnZba10gPz89ICcxJ1xuICB9XG59XG5cbi8qKlxuICogQm9vdHN0cmFwIGVudHJ5cG9pbnQgLSBjaGVja3MgZm9yIHNwZWNpYWwgZmxhZ3MgYmVmb3JlIGxvYWRpbmcgdGhlIGZ1bGwgQ0xJLlxuICogQWxsIGltcG9ydHMgYXJlIGR5bmFtaWMgdG8gbWluaW1pemUgbW9kdWxlIGV2YWx1YXRpb24gZm9yIGZhc3QgcGF0aHMuXG4gKiBGYXN0LXBhdGggZm9yIC0tdmVyc2lvbiBoYXMgemVybyBpbXBvcnRzIGJleW9uZCB0aGlzIGZpbGUuXG4gKi9cbmFzeW5jIGZ1bmN0aW9uIG1haW4oKTogUHJvbWlzZTx2b2lkPiB7XG4gIGNvbnN0IGFyZ3MgPSBwcm9jZXNzLmFyZ3Yuc2xpY2UoMilcblxuICAvLyBGYXN0LXBhdGggZm9yIC0tdmVyc2lvbi8tdjogemVybyBtb2R1bGUgbG9hZGluZyBuZWVkZWRcbiAgaWYgKFxuICAgIGFyZ3MubGVuZ3RoID09PSAxICYmXG4gICAgKGFyZ3NbMF0gPT09ICctLXZlcnNpb24nIHx8IGFyZ3NbMF0gPT09ICctdicgfHwgYXJnc1swXSA9PT0gJy1WJylcbiAgKSB7XG4gICAgLy8gTUFDUk8uVkVSU0lPTiBpcyBpbmxpbmVkIGF0IGJ1aWxkIHRpbWVcbiAgICAvLyBiaW9tZS1pZ25vcmUgbGludC9zdXNwaWNpb3VzL25vQ29uc29sZTo6IGludGVudGlvbmFsIGNvbnNvbGUgb3V0cHV0XG4gICAgY29uc29sZS5sb2coYCR7TUFDUk8uVkVSU0lPTn0gKENsYXVkZSBDb2RlKWApXG4gICAgcmV0dXJuXG4gIH1cblxuICAvLyBGb3IgYWxsIG90aGVyIHBhdGhzLCBsb2FkIHRoZSBzdGFydHVwIHByb2ZpbGVyXG4gIGNvbnN0IHsgcHJvZmlsZUNoZWNrcG9pbnQgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvc3RhcnR1cFByb2ZpbGVyLmpzJylcbiAgcHJvZmlsZUNoZWNrcG9pbnQoJ2NsaV9lbnRyeScpXG5cbiAgLy8gRmFzdC1wYXRoIGZvciAtLWR1bXAtc3lzdGVtLXByb21wdDogb3V0cHV0IHRoZSByZW5kZXJlZCBzeXN0ZW0gcHJvbXB0IGFuZCBleGl0LlxuICAvLyBVc2VkIGJ5IHByb21wdCBzZW5zaXRpdml0eSBldmFscyB0byBleHRyYWN0IHRoZSBzeXN0ZW0gcHJvbXB0IGF0IGEgc3BlY2lmaWMgY29tbWl0LlxuICAvLyBBbnQtb25seTogZWxpbWluYXRlZCBmcm9tIGV4dGVybmFsIGJ1aWxkcyB2aWEgZmVhdHVyZSBmbGFnLlxuICBpZiAoZmVhdHVyZSgnRFVNUF9TWVNURU1fUFJPTVBUJykgJiYgYXJnc1swXSA9PT0gJy0tZHVtcC1zeXN0ZW0tcHJvbXB0Jykge1xuICAgIHByb2ZpbGVDaGVja3BvaW50KCdjbGlfZHVtcF9zeXN0ZW1fcHJvbXB0X3BhdGgnKVxuICAgIGNvbnN0IHsgZW5hYmxlQ29uZmlncyB9ID0gYXdhaXQgaW1wb3J0KCcuLi91dGlscy9jb25maWcuanMnKVxuICAgIGVuYWJsZUNvbmZpZ3MoKVxuICAgIGNvbnN0IHsgZ2V0TWFpbkxvb3BNb2RlbCB9ID0gYXdhaXQgaW1wb3J0KCcuLi91dGlscy9tb2RlbC9tb2RlbC5qcycpXG4gICAgY29uc3QgbW9kZWxJZHggPSBhcmdzLmluZGV4T2YoJy0tbW9kZWwnKVxuICAgIGNvbnN0IG1vZGVsID0gKG1vZGVsSWR4ICE9PSAtMSAmJiBhcmdzW21vZGVsSWR4ICsgMV0pIHx8IGdldE1haW5Mb29wTW9kZWwoKVxuICAgIGNvbnN0IHsgZ2V0U3lzdGVtUHJvbXB0IH0gPSBhd2FpdCBpbXBvcnQoJy4uL2NvbnN0YW50cy9wcm9tcHRzLmpzJylcbiAgICBjb25zdCBwcm9tcHQgPSBhd2FpdCBnZXRTeXN0ZW1Qcm9tcHQoW10sIG1vZGVsKVxuICAgIC8vIGJpb21lLWlnbm9yZSBsaW50L3N1c3BpY2lvdXMvbm9Db25zb2xlOjogaW50ZW50aW9uYWwgY29uc29sZSBvdXRwdXRcbiAgICBjb25zb2xlLmxvZyhwcm9tcHQuam9pbignXFxuJykpXG4gICAgcmV0dXJuXG4gIH1cblxuICBpZiAocHJvY2Vzcy5hcmd2WzJdID09PSAnLS1jbGF1ZGUtaW4tY2hyb21lLW1jcCcpIHtcbiAgICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2NsYXVkZV9pbl9jaHJvbWVfbWNwX3BhdGgnKVxuICAgIGNvbnN0IHsgcnVuQ2xhdWRlSW5DaHJvbWVNY3BTZXJ2ZXIgfSA9IGF3YWl0IGltcG9ydChcbiAgICAgICcuLi91dGlscy9jbGF1ZGVJbkNocm9tZS9tY3BTZXJ2ZXIuanMnXG4gICAgKVxuICAgIGF3YWl0IHJ1bkNsYXVkZUluQ2hyb21lTWNwU2VydmVyKClcbiAgICByZXR1cm5cbiAgfSBlbHNlIGlmIChwcm9jZXNzLmFyZ3ZbMl0gPT09ICctLWNocm9tZS1uYXRpdmUtaG9zdCcpIHtcbiAgICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2Nocm9tZV9uYXRpdmVfaG9zdF9wYXRoJylcbiAgICBjb25zdCB7IHJ1bkNocm9tZU5hdGl2ZUhvc3QgfSA9IGF3YWl0IGltcG9ydChcbiAgICAgICcuLi91dGlscy9jbGF1ZGVJbkNocm9tZS9jaHJvbWVOYXRpdmVIb3N0LmpzJ1xuICAgIClcbiAgICBhd2FpdCBydW5DaHJvbWVOYXRpdmVIb3N0KClcbiAgICByZXR1cm5cbiAgfSBlbHNlIGlmIChcbiAgICBmZWF0dXJlKCdDSElDQUdPX01DUCcpICYmXG4gICAgcHJvY2Vzcy5hcmd2WzJdID09PSAnLS1jb21wdXRlci11c2UtbWNwJ1xuICApIHtcbiAgICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2NvbXB1dGVyX3VzZV9tY3BfcGF0aCcpXG4gICAgY29uc3QgeyBydW5Db21wdXRlclVzZU1jcFNlcnZlciB9ID0gYXdhaXQgaW1wb3J0KFxuICAgICAgJy4uL3V0aWxzL2NvbXB1dGVyVXNlL21jcFNlcnZlci5qcydcbiAgICApXG4gICAgYXdhaXQgcnVuQ29tcHV0ZXJVc2VNY3BTZXJ2ZXIoKVxuICAgIHJldHVyblxuICB9XG5cbiAgLy8gRmFzdC1wYXRoIGZvciBgLS1kYWVtb24td29ya2VyPTxraW5kPmAgKGludGVybmFsIOKAlCBzdXBlcnZpc29yIHNwYXducyB0aGlzKS5cbiAgLy8gTXVzdCBjb21lIGJlZm9yZSB0aGUgZGFlbW9uIHN1YmNvbW1hbmQgY2hlY2s6IHNwYXduZWQgcGVyLXdvcmtlciwgc29cbiAgLy8gcGVyZi1zZW5zaXRpdmUuIE5vIGVuYWJsZUNvbmZpZ3MoKSwgbm8gYW5hbHl0aWNzIHNpbmtzIGF0IHRoaXMgbGF5ZXIg4oCUXG4gIC8vIHdvcmtlcnMgYXJlIGxlYW4uIElmIGEgd29ya2VyIGtpbmQgbmVlZHMgY29uZmlncy9hdXRoIChhc3Npc3RhbnQgd2lsbCksXG4gIC8vIGl0IGNhbGxzIHRoZW0gaW5zaWRlIGl0cyBydW4oKSBmbi5cbiAgaWYgKGZlYXR1cmUoJ0RBRU1PTicpICYmIGFyZ3NbMF0gPT09ICctLWRhZW1vbi13b3JrZXInKSB7XG4gICAgY29uc3QgeyBydW5EYWVtb25Xb3JrZXIgfSA9IGF3YWl0IGltcG9ydCgnLi4vZGFlbW9uL3dvcmtlclJlZ2lzdHJ5LmpzJylcbiAgICBhd2FpdCBydW5EYWVtb25Xb3JrZXIoYXJnc1sxXSlcbiAgICByZXR1cm5cbiAgfVxuXG4gIC8vIEZhc3QtcGF0aCBmb3IgYGNsYXVkZSByZW1vdGUtY29udHJvbGAgKGFsc28gYWNjZXB0cyBsZWdhY3kgYGNsYXVkZSByZW1vdGVgIC8gYGNsYXVkZSBzeW5jYCAvIGBjbGF1ZGUgYnJpZGdlYCk6XG4gIC8vIHNlcnZlIGxvY2FsIG1hY2hpbmUgYXMgYnJpZGdlIGVudmlyb25tZW50LlxuICAvLyBmZWF0dXJlKCkgbXVzdCBzdGF5IGlubGluZSBmb3IgYnVpbGQtdGltZSBkZWFkIGNvZGUgZWxpbWluYXRpb247XG4gIC8vIGlzQnJpZGdlRW5hYmxlZCgpIGNoZWNrcyB0aGUgcnVudGltZSBHcm93dGhCb29rIGdhdGUuXG4gIGlmIChcbiAgICBmZWF0dXJlKCdCUklER0VfTU9ERScpICYmXG4gICAgKGFyZ3NbMF0gPT09ICdyZW1vdGUtY29udHJvbCcgfHxcbiAgICAgIGFyZ3NbMF0gPT09ICdyYycgfHxcbiAgICAgIGFyZ3NbMF0gPT09ICdyZW1vdGUnIHx8XG4gICAgICBhcmdzWzBdID09PSAnc3luYycgfHxcbiAgICAgIGFyZ3NbMF0gPT09ICdicmlkZ2UnKVxuICApIHtcbiAgICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2JyaWRnZV9wYXRoJylcbiAgICBjb25zdCB7IGVuYWJsZUNvbmZpZ3MgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvY29uZmlnLmpzJylcbiAgICBlbmFibGVDb25maWdzKClcblxuICAgIGNvbnN0IHsgZ2V0QnJpZGdlRGlzYWJsZWRSZWFzb24sIGNoZWNrQnJpZGdlTWluVmVyc2lvbiB9ID0gYXdhaXQgaW1wb3J0KFxuICAgICAgJy4uL2JyaWRnZS9icmlkZ2VFbmFibGVkLmpzJ1xuICAgIClcbiAgICBjb25zdCB7IEJSSURHRV9MT0dJTl9FUlJPUiB9ID0gYXdhaXQgaW1wb3J0KCcuLi9icmlkZ2UvdHlwZXMuanMnKVxuICAgIGNvbnN0IHsgYnJpZGdlTWFpbiB9ID0gYXdhaXQgaW1wb3J0KCcuLi9icmlkZ2UvYnJpZGdlTWFpbi5qcycpXG4gICAgY29uc3QgeyBleGl0V2l0aEVycm9yIH0gPSBhd2FpdCBpbXBvcnQoJy4uL3V0aWxzL3Byb2Nlc3MuanMnKVxuXG4gICAgLy8gQXV0aCBjaGVjayBtdXN0IGNvbWUgYmVmb3JlIHRoZSBHcm93dGhCb29rIGdhdGUgY2hlY2sg4oCUIHdpdGhvdXQgYXV0aCxcbiAgICAvLyBHcm93dGhCb29rIGhhcyBubyB1c2VyIGNvbnRleHQgYW5kIHdvdWxkIHJldHVybiBhIHN0YWxlL2RlZmF1bHQgZmFsc2UuXG4gICAgLy8gZ2V0QnJpZGdlRGlzYWJsZWRSZWFzb24gYXdhaXRzIEdCIGluaXQsIHNvIHRoZSByZXR1cm5lZCB2YWx1ZSBpcyBmcmVzaFxuICAgIC8vIChub3QgdGhlIHN0YWxlIGRpc2sgY2FjaGUpLCBidXQgaW5pdCBzdGlsbCBuZWVkcyBhdXRoIGhlYWRlcnMgdG8gd29yay5cbiAgICBjb25zdCB7IGdldENsYXVkZUFJT0F1dGhUb2tlbnMgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvYXV0aC5qcycpXG4gICAgaWYgKCFnZXRDbGF1ZGVBSU9BdXRoVG9rZW5zKCk/LmFjY2Vzc1Rva2VuKSB7XG4gICAgICBleGl0V2l0aEVycm9yKEJSSURHRV9MT0dJTl9FUlJPUilcbiAgICB9XG4gICAgY29uc3QgZGlzYWJsZWRSZWFzb24gPSBhd2FpdCBnZXRCcmlkZ2VEaXNhYmxlZFJlYXNvbigpXG4gICAgaWYgKGRpc2FibGVkUmVhc29uKSB7XG4gICAgICBleGl0V2l0aEVycm9yKGBFcnJvcjogJHtkaXNhYmxlZFJlYXNvbn1gKVxuICAgIH1cbiAgICBjb25zdCB2ZXJzaW9uRXJyb3IgPSBjaGVja0JyaWRnZU1pblZlcnNpb24oKVxuICAgIGlmICh2ZXJzaW9uRXJyb3IpIHtcbiAgICAgIGV4aXRXaXRoRXJyb3IodmVyc2lvbkVycm9yKVxuICAgIH1cblxuICAgIC8vIEJyaWRnZSBpcyBhIHJlbW90ZSBjb250cm9sIGZlYXR1cmUgLSBjaGVjayBwb2xpY3kgbGltaXRzXG4gICAgY29uc3QgeyB3YWl0Rm9yUG9saWN5TGltaXRzVG9Mb2FkLCBpc1BvbGljeUFsbG93ZWQgfSA9IGF3YWl0IGltcG9ydChcbiAgICAgICcuLi9zZXJ2aWNlcy9wb2xpY3lMaW1pdHMvaW5kZXguanMnXG4gICAgKVxuICAgIGF3YWl0IHdhaXRGb3JQb2xpY3lMaW1pdHNUb0xvYWQoKVxuICAgIGlmICghaXNQb2xpY3lBbGxvd2VkKCdhbGxvd19yZW1vdGVfY29udHJvbCcpKSB7XG4gICAgICBleGl0V2l0aEVycm9yKFxuICAgICAgICBcIkVycm9yOiBSZW1vdGUgQ29udHJvbCBpcyBkaXNhYmxlZCBieSB5b3VyIG9yZ2FuaXphdGlvbidzIHBvbGljeS5cIixcbiAgICAgIClcbiAgICB9XG5cbiAgICBhd2FpdCBicmlkZ2VNYWluKGFyZ3Muc2xpY2UoMSkpXG4gICAgcmV0dXJuXG4gIH1cblxuICAvLyBGYXN0LXBhdGggZm9yIGBjbGF1ZGUgZGFlbW9uIFtzdWJjb21tYW5kXWA6IGxvbmctcnVubmluZyBzdXBlcnZpc29yLlxuICBpZiAoZmVhdHVyZSgnREFFTU9OJykgJiYgYXJnc1swXSA9PT0gJ2RhZW1vbicpIHtcbiAgICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2RhZW1vbl9wYXRoJylcbiAgICBjb25zdCB7IGVuYWJsZUNvbmZpZ3MgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvY29uZmlnLmpzJylcbiAgICBlbmFibGVDb25maWdzKClcbiAgICBjb25zdCB7IGluaXRTaW5rcyB9ID0gYXdhaXQgaW1wb3J0KCcuLi91dGlscy9zaW5rcy5qcycpXG4gICAgaW5pdFNpbmtzKClcbiAgICBjb25zdCB7IGRhZW1vbk1haW4gfSA9IGF3YWl0IGltcG9ydCgnLi4vZGFlbW9uL21haW4uanMnKVxuICAgIGF3YWl0IGRhZW1vbk1haW4oYXJncy5zbGljZSgxKSlcbiAgICByZXR1cm5cbiAgfVxuXG4gIC8vIEZhc3QtcGF0aCBmb3IgYGNsYXVkZSBwc3xsb2dzfGF0dGFjaHxraWxsYCBhbmQgYC0tYmdgL2AtLWJhY2tncm91bmRgLlxuICAvLyBTZXNzaW9uIG1hbmFnZW1lbnQgYWdhaW5zdCB0aGUgfi8uY2xhdWRlL3Nlc3Npb25zLyByZWdpc3RyeS4gRmxhZ1xuICAvLyBsaXRlcmFscyBhcmUgaW5saW5lZCBzbyBiZy5qcyBvbmx5IGxvYWRzIHdoZW4gYWN0dWFsbHkgZGlzcGF0Y2hpbmcuXG4gIGlmIChcbiAgICBmZWF0dXJlKCdCR19TRVNTSU9OUycpICYmXG4gICAgKGFyZ3NbMF0gPT09ICdwcycgfHxcbiAgICAgIGFyZ3NbMF0gPT09ICdsb2dzJyB8fFxuICAgICAgYXJnc1swXSA9PT0gJ2F0dGFjaCcgfHxcbiAgICAgIGFyZ3NbMF0gPT09ICdraWxsJyB8fFxuICAgICAgYXJncy5pbmNsdWRlcygnLS1iZycpIHx8XG4gICAgICBhcmdzLmluY2x1ZGVzKCctLWJhY2tncm91bmQnKSlcbiAgKSB7XG4gICAgcHJvZmlsZUNoZWNrcG9pbnQoJ2NsaV9iZ19wYXRoJylcbiAgICBjb25zdCB7IGVuYWJsZUNvbmZpZ3MgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvY29uZmlnLmpzJylcbiAgICBlbmFibGVDb25maWdzKClcbiAgICBjb25zdCBiZyA9IGF3YWl0IGltcG9ydCgnLi4vY2xpL2JnLmpzJylcbiAgICBzd2l0Y2ggKGFyZ3NbMF0pIHtcbiAgICAgIGNhc2UgJ3BzJzpcbiAgICAgICAgYXdhaXQgYmcucHNIYW5kbGVyKGFyZ3Muc2xpY2UoMSkpXG4gICAgICAgIGJyZWFrXG4gICAgICBjYXNlICdsb2dzJzpcbiAgICAgICAgYXdhaXQgYmcubG9nc0hhbmRsZXIoYXJnc1sxXSlcbiAgICAgICAgYnJlYWtcbiAgICAgIGNhc2UgJ2F0dGFjaCc6XG4gICAgICAgIGF3YWl0IGJnLmF0dGFjaEhhbmRsZXIoYXJnc1sxXSlcbiAgICAgICAgYnJlYWtcbiAgICAgIGNhc2UgJ2tpbGwnOlxuICAgICAgICBhd2FpdCBiZy5raWxsSGFuZGxlcihhcmdzWzFdKVxuICAgICAgICBicmVha1xuICAgICAgZGVmYXVsdDpcbiAgICAgICAgYXdhaXQgYmcuaGFuZGxlQmdGbGFnKGFyZ3MpXG4gICAgfVxuICAgIHJldHVyblxuICB9XG5cbiAgLy8gRmFzdC1wYXRoIGZvciB0ZW1wbGF0ZSBqb2IgY29tbWFuZHMuXG4gIGlmIChcbiAgICBmZWF0dXJlKCdURU1QTEFURVMnKSAmJlxuICAgIChhcmdzWzBdID09PSAnbmV3JyB8fCBhcmdzWzBdID09PSAnbGlzdCcgfHwgYXJnc1swXSA9PT0gJ3JlcGx5JylcbiAgKSB7XG4gICAgcHJvZmlsZUNoZWNrcG9pbnQoJ2NsaV90ZW1wbGF0ZXNfcGF0aCcpXG4gICAgY29uc3QgeyB0ZW1wbGF0ZXNNYWluIH0gPSBhd2FpdCBpbXBvcnQoJy4uL2NsaS9oYW5kbGVycy90ZW1wbGF0ZUpvYnMuanMnKVxuICAgIGF3YWl0IHRlbXBsYXRlc01haW4oYXJncylcbiAgICAvLyBwcm9jZXNzLmV4aXQgKG5vdCByZXR1cm4pIOKAlCBtb3VudEZsZWV0VmlldydzIEluayBUVUkgY2FuIGxlYXZlIGV2ZW50XG4gICAgLy8gbG9vcCBoYW5kbGVzIHRoYXQgcHJldmVudCBuYXR1cmFsIGV4aXQuXG4gICAgLy8gZXNsaW50LWRpc2FibGUtbmV4dC1saW5lIGN1c3RvbS1ydWxlcy9uby1wcm9jZXNzLWV4aXRcbiAgICBwcm9jZXNzLmV4aXQoMClcbiAgfVxuXG4gIC8vIEZhc3QtcGF0aCBmb3IgYGNsYXVkZSBlbnZpcm9ubWVudC1ydW5uZXJgOiBoZWFkbGVzcyBCWU9DIHJ1bm5lci5cbiAgLy8gZmVhdHVyZSgpIG11c3Qgc3RheSBpbmxpbmUgZm9yIGJ1aWxkLXRpbWUgZGVhZCBjb2RlIGVsaW1pbmF0aW9uLlxuICBpZiAoZmVhdHVyZSgnQllPQ19FTlZJUk9OTUVOVF9SVU5ORVInKSAmJiBhcmdzWzBdID09PSAnZW52aXJvbm1lbnQtcnVubmVyJykge1xuICAgIHByb2ZpbGVDaGVja3BvaW50KCdjbGlfZW52aXJvbm1lbnRfcnVubmVyX3BhdGgnKVxuICAgIGNvbnN0IHsgZW52aXJvbm1lbnRSdW5uZXJNYWluIH0gPSBhd2FpdCBpbXBvcnQoXG4gICAgICAnLi4vZW52aXJvbm1lbnQtcnVubmVyL21haW4uanMnXG4gICAgKVxuICAgIGF3YWl0IGVudmlyb25tZW50UnVubmVyTWFpbihhcmdzLnNsaWNlKDEpKVxuICAgIHJldHVyblxuICB9XG5cbiAgLy8gRmFzdC1wYXRoIGZvciBgY2xhdWRlIHNlbGYtaG9zdGVkLXJ1bm5lcmA6IGhlYWRsZXNzIHNlbGYtaG9zdGVkLXJ1bm5lclxuICAvLyB0YXJnZXRpbmcgdGhlIFNlbGZIb3N0ZWRSdW5uZXJXb3JrZXJTZXJ2aWNlIEFQSSAocmVnaXN0ZXIgKyBwb2xsOyBwb2xsIElTXG4gIC8vIGhlYXJ0YmVhdCkuIGZlYXR1cmUoKSBtdXN0IHN0YXkgaW5saW5lIGZvciBidWlsZC10aW1lIGRlYWQgY29kZSBlbGltaW5hdGlvbi5cbiAgaWYgKGZlYXR1cmUoJ1NFTEZfSE9TVEVEX1JVTk5FUicpICYmIGFyZ3NbMF0gPT09ICdzZWxmLWhvc3RlZC1ydW5uZXInKSB7XG4gICAgcHJvZmlsZUNoZWNrcG9pbnQoJ2NsaV9zZWxmX2hvc3RlZF9ydW5uZXJfcGF0aCcpXG4gICAgY29uc3QgeyBzZWxmSG9zdGVkUnVubmVyTWFpbiB9ID0gYXdhaXQgaW1wb3J0KFxuICAgICAgJy4uL3NlbGYtaG9zdGVkLXJ1bm5lci9tYWluLmpzJ1xuICAgIClcbiAgICBhd2FpdCBzZWxmSG9zdGVkUnVubmVyTWFpbihhcmdzLnNsaWNlKDEpKVxuICAgIHJldHVyblxuICB9XG5cbiAgLy8gRmFzdC1wYXRoIGZvciAtLXdvcmt0cmVlIC0tdG11eDogZXhlYyBpbnRvIHRtdXggYmVmb3JlIGxvYWRpbmcgZnVsbCBDTElcbiAgY29uc3QgaGFzVG11eEZsYWcgPSBhcmdzLmluY2x1ZGVzKCctLXRtdXgnKSB8fCBhcmdzLmluY2x1ZGVzKCctLXRtdXg9Y2xhc3NpYycpXG4gIGlmIChcbiAgICBoYXNUbXV4RmxhZyAmJlxuICAgIChhcmdzLmluY2x1ZGVzKCctdycpIHx8XG4gICAgICBhcmdzLmluY2x1ZGVzKCctLXdvcmt0cmVlJykgfHxcbiAgICAgIGFyZ3Muc29tZShhID0+IGEuc3RhcnRzV2l0aCgnLS13b3JrdHJlZT0nKSkpXG4gICkge1xuICAgIHByb2ZpbGVDaGVja3BvaW50KCdjbGlfdG11eF93b3JrdHJlZV9mYXN0X3BhdGgnKVxuICAgIGNvbnN0IHsgZW5hYmxlQ29uZmlncyB9ID0gYXdhaXQgaW1wb3J0KCcuLi91dGlscy9jb25maWcuanMnKVxuICAgIGVuYWJsZUNvbmZpZ3MoKVxuICAgIGNvbnN0IHsgaXNXb3JrdHJlZU1vZGVFbmFibGVkIH0gPSBhd2FpdCBpbXBvcnQoXG4gICAgICAnLi4vdXRpbHMvd29ya3RyZWVNb2RlRW5hYmxlZC5qcydcbiAgICApXG4gICAgaWYgKGlzV29ya3RyZWVNb2RlRW5hYmxlZCgpKSB7XG4gICAgICBjb25zdCB7IGV4ZWNJbnRvVG11eFdvcmt0cmVlIH0gPSBhd2FpdCBpbXBvcnQoJy4uL3V0aWxzL3dvcmt0cmVlLmpzJylcbiAgICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IGV4ZWNJbnRvVG11eFdvcmt0cmVlKGFyZ3MpXG4gICAgICBpZiAocmVzdWx0LmhhbmRsZWQpIHtcbiAgICAgICAgcmV0dXJuXG4gICAgICB9XG4gICAgICAvLyBJZiBub3QgaGFuZGxlZCAoZS5nLiwgZXJyb3IpLCBmYWxsIHRocm91Z2ggdG8gbm9ybWFsIENMSVxuICAgICAgaWYgKHJlc3VsdC5lcnJvcikge1xuICAgICAgICBjb25zdCB7IGV4aXRXaXRoRXJyb3IgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvcHJvY2Vzcy5qcycpXG4gICAgICAgIGV4aXRXaXRoRXJyb3IocmVzdWx0LmVycm9yKVxuICAgICAgfVxuICAgIH1cbiAgfVxuXG4gIC8vIFJlZGlyZWN0IGNvbW1vbiB1cGRhdGUgZmxhZyBtaXN0YWtlcyB0byB0aGUgdXBkYXRlIHN1YmNvbW1hbmRcbiAgaWYgKFxuICAgIGFyZ3MubGVuZ3RoID09PSAxICYmXG4gICAgKGFyZ3NbMF0gPT09ICctLXVwZGF0ZScgfHwgYXJnc1swXSA9PT0gJy0tdXBncmFkZScpXG4gICkge1xuICAgIHByb2Nlc3MuYXJndiA9IFtwcm9jZXNzLmFyZ3ZbMF0hLCBwcm9jZXNzLmFyZ3ZbMV0hLCAndXBkYXRlJ11cbiAgfVxuXG4gIC8vIC0tYmFyZTogc2V0IFNJTVBMRSBlYXJseSBzbyBnYXRlcyBmaXJlIGR1cmluZyBtb2R1bGUgZXZhbCAvIGNvbW1hbmRlclxuICAvLyBvcHRpb24gYnVpbGRpbmcgKG5vdCBqdXN0IGluc2lkZSB0aGUgYWN0aW9uIGhhbmRsZXIpLlxuICBpZiAoYXJncy5pbmNsdWRlcygnLS1iYXJlJykpIHtcbiAgICBwcm9jZXNzLmVudi5DTEFVREVfQ09ERV9TSU1QTEUgPSAnMSdcbiAgfVxuXG4gIC8vIE5vIHNwZWNpYWwgZmxhZ3MgZGV0ZWN0ZWQsIGxvYWQgYW5kIHJ1biB0aGUgZnVsbCBDTElcbiAgY29uc3QgeyBzdGFydENhcHR1cmluZ0Vhcmx5SW5wdXQgfSA9IGF3YWl0IGltcG9ydCgnLi4vdXRpbHMvZWFybHlJbnB1dC5qcycpXG4gIHN0YXJ0Q2FwdHVyaW5nRWFybHlJbnB1dCgpXG4gIHByb2ZpbGVDaGVja3BvaW50KCdjbGlfYmVmb3JlX21haW5faW1wb3J0JylcbiAgY29uc3QgeyBtYWluOiBjbGlNYWluIH0gPSBhd2FpdCBpbXBvcnQoJy4uL21haW4uanMnKVxuICBwcm9maWxlQ2hlY2twb2ludCgnY2xpX2FmdGVyX21haW5faW1wb3J0JylcbiAgYXdhaXQgY2xpTWFpbigpXG4gIHByb2ZpbGVDaGVja3BvaW50KCdjbGlfYWZ0ZXJfbWFpbl9jb21wbGV0ZScpXG59XG5cbi8vIGVzbGludC1kaXNhYmxlLW5leHQtbGluZSBjdXN0b20tcnVsZXMvbm8tdG9wLWxldmVsLXNpZGUtZWZmZWN0c1xudm9pZCBtYWluKClcbiJdLCJtYXBwaW5ncyI6IkFBQUEsU0FBU0EsT0FBTyxRQUFRLFlBQVk7O0FBRXBDO0FBQ0E7QUFDQUMsT0FBTyxDQUFDQyxHQUFHLENBQUNDLHdCQUF3QixHQUFHLEdBQUc7O0FBRTFDO0FBQ0E7QUFDQSxJQUFJRixPQUFPLENBQUNDLEdBQUcsQ0FBQ0Usa0JBQWtCLEtBQUssTUFBTSxFQUFFO0VBQzdDO0VBQ0EsTUFBTUMsUUFBUSxHQUFHSixPQUFPLENBQUNDLEdBQUcsQ0FBQ0ksWUFBWSxJQUFJLEVBQUU7RUFDL0M7RUFDQUwsT0FBTyxDQUFDQyxHQUFHLENBQUNJLFlBQVksR0FBR0QsUUFBUSxHQUMvQixHQUFHQSxRQUFRLDRCQUE0QixHQUN2QywyQkFBMkI7QUFDakM7O0FBRUE7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBLElBQUlMLE9BQU8sQ0FBQyxtQkFBbUIsQ0FBQyxJQUFJQyxP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
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6WyJmZWF0dXJlIiwicHJvY2VzcyIsImVydiIsIkNPUkVQQUNLX0VOQUJMRV9BVVRPX1BJTiIsIkNMQVVERV9DT0RFX1JFTU9URSIsImV4aXN0aW5nIiwiTk9ERV9PUFRJT05TIiwiQ0xBVURFX0NPREVfQUJMQVRJT05fQkFTRUxJTkUiLCJrIiwibWFpbiIsIlByb21pc2UiLCJhcmdzIiwiYXJndyIsInNsaWNlIiwibGVuZ3RoIiwiY29uc29sZSIsImxvZyIsIk1BQ1JPIiwiVkVSU0lPTiIsInByb2ZpbGVDaGVja3BvaW50IiwiZW5hYmxlQ29uZmlncyIsImdldE1haW5Mb29wTW9kZWwiLCJtb2RlbElkeCIsImluZGV4T2YiLCJtb2RlbCIsImdldFN5c3RlbVByb21wdCIsInByb21wdCIsImpvaW4iLCJydW5DbGF1ZUlOY2hyb21lTWNzU2VydmVyIiwicnVuQ2hyb21lTmF0aXZlSG9zdCIsInJ1bkNvbXB1dGVVc2VNa3BTZXJ2ZXIiLCJydW5EYWVtb25Xb3JrZSIpLCJnZXRCcmlkZ2VEaXNhYmxlZFJlYXNvbiIsImNoZWNrQnJpZGdlTWluVmVyc2lvbiIsIkJSSUVHR1BfTE9HSU5fRVJST1JCIx7YnJpZGdlTWFpblz9leGl0V2l0aEVycm9yIiwKZ2V0Q2xhdWRlQUlPQXV0aFRva2VuczpcImFjY2Vzc1Rva2VuIix9LGRpc2FibGVkUmVhc29uIiwidmVyc2lvkVycm9yIiwgd2FpdEZvclBvbGljeUxpbWl0c1RvTG9hZCpcImlzUG9saWN5QWxsb3dlZC0pLmtpbGwvcm9jXHVwcmVzcy5pbmZvIiwiCiJkYWVtb25NYWluIiwiam5sdWRlX2ZpbHRlcnMiLCJCY190cmF5IiwicHNSaGFuZGxlciIsIGxvZ3NIYW5kbGVyIiwiYXR0YWNoSGFuZGxlciIsImtpbGxIYW5kbGVyIiwiaGFuZGxlQmdGbGFnXCIgKCAp0ZW1wbGF0ZXNOYWluIiwiZXhpdCIsIGVudmlyb25tZW50UnVubmVyTWFpbiBzZWxmSG9zdGVkUnVubmVyTWFpbiBoYXNTdHV4RmxhZ3xzdW1lIGEgc3RhcnRzV2l0aCBpc1dvcmt0cmVlTW9kZUVuYWJsZWQcLeGVjSW50b0RtdXhXb3JrdHJlZQpyZXN1bHQgaGFuZGxlZCAgcmVzdWx0LmVycm9yXGV4aXRXaXRoRXJyb3IgY2xvbmtgLy0tc2ltcGxlLCAuYXJnc19pbmNsdWRlcyAtLX [...] (更长了，这里省略sourcemap)

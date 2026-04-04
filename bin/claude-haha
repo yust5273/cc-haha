@@ -1,16 +1,52 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 上面这行是 Shebang：告诉系统这是一个 Bash 脚本，需要用 bash 命令解释执行
+# /usr/bin/env 会去系统 PATH 中找 bash，比硬编码 /bin/bash 更灵活，提高兼容性
 
+# 设置 Bash 安全选项，让脚本遇到错误立即退出，避免隐藏问题
+set -euo pipefail
+# -e: 任何命令执行失败（返回非零退出码）时，立即退出整个脚本
+# -u: 使用了未定义的变量时，立即报错退出（防止手拼错变量名导致问题）
+# -o pipefail: 管道中只要有一个命令失败，整个管道就算失败（默认只有最后一个命令失败才算失败）
+# 这三个设置是生产环境 Bash 脚本的最佳实践，让脚本更健壮，错误尽早暴露
+
+# 获取项目根目录的绝对路径
+# ${BASH_SOURCE[0]} 是当前这个脚本文件自己的路径
+# dirname 取出脚本所在的目录，这里就是 bin/
+# 然后 cd .. 进入项目根目录，再用 pwd 输出绝对路径
+# 最终结果保存到 ROOT_DIR 环境变量中
+# 这样不管你从哪个目录执行这个脚本，都能正确找到项目根目录
+# 脚本所属项目所在路径，即Claude code项目的路径
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-#Get your current working directory and export it as an environment variable.
+
+# 记录用户调用这个命令时所在的原始工作目录
+# 为什么需要这个？因为我们后面会 cd 到项目根目录，但用户可能在任意目录下执行 claude-haha
+# Claude Code 需要知道用户实际是在哪个目录工作，才能正确读取和索引那个目录下的文件
+# pwd -W: macOS 的 pwd 支持 -W 参数，用于兼容 Git Bash 输出正确的路径格式
+# 2>/dev/null: 如果 -W 参数不支持（比如 Linux 系统），忽略错误信息
+# || pwd: 如果 pwd -W 失败，退回到普通 pwd 命令获取路径
+# export: 将这个目录导出为环境变量，让后面运行的 Bun/Node.js 代码可以读取到它
+# 业务代码项目的路径
 export CALLER_DIR="$(pwd -W 2>/dev/null || pwd)"
 
+# 将当前工作目录切换到项目根目录
+# 这样后面代码中使用相对路径（比如 ./src/xxx）才能正确找到文件
 cd "$ROOT_DIR"
 
-# Force recovery CLI (simple readline REPL, no Ink TUI)
+# 检查环境变量：是否强制启用恢复 CLI 模式
+# ${VAR:-0} 的意思是：如果环境变量 CLAUDE_CODE_FORCE_RECOVERY_CLI 没有设置，默认使用值 0
+# 恢复模式是一个极简版本，只使用简单的 readline 文本交互，不启动完整的 React + Ink TUI 终端界面
+# 当完整 TUI 无法启动时（比如终端不支持，或者环境有问题），可以用这个模式降级使用
 if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
+  # exec: 使用 bun 进程替换当前的 Shell 进程
+  # 好处是：信号可以正确传递（比如 Ctrl+C 会直接退出程序），不需要保留多余的 Shell 进程
+  # bun: 使用 Bun JavaScript 运行时执行 TypeScript 代码（本项目要求使用 Bun）
+  # --env-file=.env: 从项目根目录的 .env 文件中读取环境变量（API Key、自定义端点等配置都存在这里）
+  # ./src/localRecoveryCli.ts: 要执行的 TypeScript 入口文件（极简恢复模式）
+  # "$@": 将当前脚本收到的所有命令行参数，原封不动传递给 bun 进程
   exec bun --env-file=.env ./src/localRecoveryCli.ts "$@"
 fi
 
-# Default: full CLI with Ink TUI
+# 默认情况：启动完整的 CLI，带 Ink TUI 终端交互界面（就是官方 Claude Code 的完整交互式界面）
+# exec 的解释同上，替换进程，正确传递信号
+# 入口点是 src/entrypoints/cli.tsx，这才是完整应用的 Bootstrap 入口
 exec bun --env-file=.env ./src/entrypoints/cli.tsx "$@"
