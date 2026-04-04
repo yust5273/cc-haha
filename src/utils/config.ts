@@ -581,6 +581,20 @@ export type GlobalConfig = {
  * Factory for a fresh default GlobalConfig. Used instead of deep-cloning a
  * shared constant — the nested containers (arrays, records) are all empty, so
  * a factory gives fresh refs at zero clone cost.
+ *
+ * 【中文说明】
+ * 作用：创建一个全新的全局配置对象，返回所有配置项的**默认初始值**。
+ *
+ * 使用场景：
+ *  - 首次运行：用户第一次启动，没有配置文件 → 用默认配置起步
+ *  - 配置损坏：JSON格式错误读不出 → 用默认配置兜底
+ *  - 配置合并：用户配置覆盖默认，没设置的字段用默认值
+ *  - 重置配置：用户重置配置 → 重新生成干净的默认对象
+ *
+ * 设计亮点：
+ *  - 工厂函数模式：每次调用返回全新对象，避免引用共享，不会意外改到共享常量
+ *  - 嵌套结构（数组、对象）每次都是全新引用，不需要深克隆，零成本
+ *  - 创建好的默认实例导出为 `DEFAULT_GLOBAL_CONFIG` 常量，大多数情况直接用
  */
 function createDefaultGlobalConfig(): GlobalConfig {
   return {
