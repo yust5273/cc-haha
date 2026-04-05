@@ -110,14 +110,26 @@ export const CLAUDE_CODE_DOCS_MAP_URL =
  * WARNING: Do not remove or reorder this marker without updating cache logic in:
  * - src/utils/api.ts (splitSysPromptPrefix)
  * - src/services/api/claude.ts (buildSystemPromptBlocks)
+ *
+ * 中文注释：
+ * 这是系统提示词的「静态/动态分界标记」，配合 Anthropic API 的 Prompt Caching 提示词缓存功能使用：
+ *  - 【此标记之前】：都是静态不变的规则（如 System、Doing tasks 等基础行为准则），所有用户/项目都一样，可以开启 scope: 'global' 全局缓存
+ *  - 【此标记之后】：都是动态内容（如 auto memory、当前环境信息），因用户/会话/项目而异，不缓存
+ *
+ * 设计理解：
+ * 通过这个简单的文本标记，让 splitSysPromptPrefix() 可以自动切分缓存块，
+ * 既节省了 Token 成本（静态内容只计费一次），又不影响动态内容每次注入。
+ * 修改这里必须同步更新上面列出的两个文件中的切分逻辑。
  */
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
   '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
 
 // @[MODEL LAUNCH]: Update the latest frontier model.
+// 中文注释：每次发布新的前沿模型时，更新这里到最新的模型名称
 const FRONTIER_MODEL_NAME = 'Claude Opus 4.6'
 
 // @[MODEL LAUNCH]: Update the model family IDs below to the latest in each tier.
+// 中文注释：每次发布新模型时，更新这里每个层级（opus/sonnet/haiku）的最新模型 ID
 const CLAUDE_4_5_OR_4_6_MODEL_IDS = {
   opus: 'claude-opus-4-6',
   sonnet: 'claude-sonnet-4-6',
@@ -202,12 +214,15 @@ function getSimpleDoingTasksSection(): string {
     `Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs). Don't use feature flags or backwards-compatibility shims when you can just change the code.`,
     `Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. The right amount of complexity is what the task actually requires—no speculative abstractions, but no half-finished implementations either. Three similar lines of code is better than a premature abstraction.`,
     // @[MODEL LAUNCH]: Update comment writing for Capybara — remove or soften once the model stops over-commenting by default
+    // 中文注释：新版本模型发布后，如果模型默认不再过度注释了，可以移除或放宽这条规则
     ...(process.env.USER_TYPE === 'ant'
       ? [
           `Default to writing no comments. Only add one when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader. If removing the comment wouldn't confuse a future reader, don't write it.`,
           `Don't explain WHAT the code does, since well-named identifiers already do that. Don't reference the current task, fix, or callers ("used by X", "added for the Y flow", "handles the case from issue #123"), since those belong in the PR description and rot as the codebase evolves.`,
           `Don't remove existing comments unless you're removing the code they describe or you know they're wrong. A comment that looks pointless to you may encode a constraint or a lesson from a past bug that isn't visible in the current diff.`,
           // @[MODEL LAUNCH]: capy v8 thoroughness counterweight (PR #24302) — un-gate once validated on external via A/B
+          // 中文注释：为了纠正 Capybara v8 模型，增加"完成任务前必须验证"规则
+          // 在外部 A/B 测试验证有效后，可以对所有用户放开这个规则
           `Before reporting a task complete, verify it actually works: run the test, execute the script, check the output. Minimum complexity means no gold-plating, not skipping the finish line. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.`,
         ]
       : []),
@@ -222,6 +237,8 @@ function getSimpleDoingTasksSection(): string {
     `The user will primarily request you to perform software engineering tasks. These may include solving bugs, adding new functionality, refactoring code, explaining code, and more. When given an unclear or generic instruction, consider it in the context of these software engineering tasks and the current working directory. For example, if the user asks you to change "methodName" to snake case, do not reply with just "method_name", instead find the method in the code and modify the code.`,
     `You are highly capable and often allow users to complete ambitious tasks that would otherwise be too complex or take too long. You should defer to user judgement about whether a task is too large to attempt.`,
     // @[MODEL LAUNCH]: capy v8 assertiveness counterweight (PR #24302) — un-gate once validated on external via A/B
+    // 中文注释：为了纠正 Capybara v8 模型过度顺从的问题，增加"你是合作者不是单纯执行者"规则
+    // 在外部 A/B 测试验证有效后，可以对所有用户放开这个规则
     ...(process.env.USER_TYPE === 'ant'
       ? [
           `If you notice the user's request is based on a misconception, or spot a bug adjacent to what they asked about, say so. You're a collaborator, not just an executor—users benefit from your judgment, not just your compliance.`,
