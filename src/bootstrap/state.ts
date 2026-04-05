@@ -834,6 +834,14 @@ export function getUsageForModel(model: string): ModelUsage | undefined {
 /**
  * Gets the model override set from the --model CLI flag or after the user
  * updates their configured model.
+ *
+ * 【中文总结】
+ * 作用：获取当前会话的模型覆盖设置
+ * 返回：undefined = 用户没覆盖 → 走正常优先级；否则返回用户指定的模型别名
+ * 优先级：会话覆盖 > 环境变量 > 配置文件，所以这里是最高优先级
+ *
+ * 【调用链路】
+ * getUserSpecifiedModelSetting() → 先调用这里 → 有覆盖直接用
  */
 export function getMainLoopModelOverride(): ModelSetting | undefined {
   return STATE.mainLoopModelOverride
@@ -843,6 +851,17 @@ export function getInitialMainLoopModel(): ModelSetting {
   return STATE.initialMainLoopModel
 }
 
+/**
+ * 设置当前会话的模型覆盖
+ *
+ * 【中文总结】
+ * 谁调用它：
+ *  1. 启动时：cli.tsx 解析 --model 参数 → 调用这里设置
+ *  2. 运行时：/model 斜杠命令 用户交互式切换模型 → 调用这里更新
+ *  3. 取消覆盖：传 undefined 即可
+ *
+ * 作用：修改全局 STATE，整个会话都生效
+ */
 export function setMainLoopModelOverride(
   model: ModelSetting | undefined,
 ): void {
