@@ -11,8 +11,25 @@ import { which } from './which.js'
 type Platform = 'win32' | 'darwin' | 'linux'
 
 // Config and data paths
+//
+// getGlobalClaudeFile: 获取 Claude Code 全局配置文件的绝对路径
+//
+// 【优先级规则】重点:
+//   1. 如果旧配置文件 `${getClaudeConfigHomeDir()}/.config.json` 存在，
+//      **不管有没有设置 CLAUDE_CONFIG_DIR 环境变量**，直接返回这个路径！
+//   2. 如果旧配置不存在:
+//      - 优先用环境变量 CLAUDE_CONFIG_DIR 指定的目录
+//      -  fallback 到用户家目录 ~/
+//   3. 文件名是 `.claude${fileSuffixForOauthConfig()}.json`，支持多个OAuth客户端共存
+//
+// 1.功能: 导出获取全局Claude配置文件路径的函数
+// 2.目的: 给整个应用提供全局配置文件的正确完整路径
+// 3.上下文: 模块顶级导出，供config.ts等其他模块调用
+// 4.原因: 需要根据兼容性、环境变量动态决定配置文件位置
+// 5.坑点: 用memoize缓存结果，启动后改环境变量不生效，必须重启程序
 export const getGlobalClaudeFile = memoize((): string => {
-  // Legacy fallback for backwards compatibility
+  // 兼容旧版本: 如果旧位置存在配置文件，直接用旧位置，优先级最高
+  // 【重点】即使设置了 CLAUDE_CONFIG_DIR，只要旧文件存在还是用旧路径
   if (
     getFsImplementation().existsSync(
       join(getClaudeConfigHomeDir(), '.config.json'),
@@ -21,7 +38,9 @@ export const getGlobalClaudeFile = memoize((): string => {
     return join(getClaudeConfigHomeDir(), '.config.json')
   }
 
+  // 没有旧文件 → 走新格式: 文件名带OAuth后缀
   const filename = `.claude${fileSuffixForOauthConfig()}.json`
+  // 优先级: CLAUDE_CONFIG_DIR 环境变量 → 用户家目录
   return join(process.env.CLAUDE_CONFIG_DIR || homedir(), filename)
 })
 
