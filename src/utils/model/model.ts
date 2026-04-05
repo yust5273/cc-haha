@@ -57,6 +57,12 @@ export function isNonCustomOpusModel(model: ModelName): boolean {
  * 2. Model override at startup (from --model flag)
  * 3. ANTHROPIC_MODEL environment variable
  * 4. Settings (from user's saved settings)
+ *
+ * 【中文总结】
+ * 作用：按优先级获取用户指定的模型设置，返回模型别名或 undefined
+ * 优先级：会话内 /model 切换 > 环境变量 ANTHROPIC_MODEL > 配置文件保存
+ * 验证：不在白名单的模型忽略，返回 undefined 让上层 fallback 到默认
+ * 返回：undefined = 用户没指定/不合法，上层用默认模型
  */
 export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
   let specifiedModel: ModelSetting | undefined
