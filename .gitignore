@@ -6,3 +6,4 @@ node_modules
 # Computer Use runtime (auto-generated)
 .runtime/
 extracted-natives/
+.claude/
