@@ -69,17 +69,23 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
 
   const modelOverride = getMainLoopModelOverride()
   if (modelOverride !== undefined) {
+    console.log(`[getUserSpecifiedModelSetting] 使用会话覆盖模型: ${modelOverride} (来自 --model 或 /model 命令)`);
     specifiedModel = modelOverride
   } else {
     const settings = getSettings_DEPRECATED() || {}
-    specifiedModel = process.env.ANTHROPIC_MODEL || settings.model || undefined
+    const envModel = process.env.ANTHROPIC_MODEL
+    const settingsModel = settings.model
+    console.log(`[getUserSpecifiedModelSetting] 无会话覆盖，env=${JSON.stringify(envModel)}, settings.model=${JSON.stringify(settingsModel)}`);
+    specifiedModel = envModel || settingsModel || undefined
   }
 
   // Ignore the user-specified model if it's not in the availableModels allowlist.
   if (specifiedModel && !isModelAllowed(specifiedModel)) {
+    console.log(`[getUserSpecifiedModelSetting] 模型 ${JSON.stringify(specifiedModel)} 不在白名单，忽略，返回 undefined`);
     return undefined
   }
 
+  console.log(`[getUserSpecifiedModelSetting] 最终返回: ${JSON.stringify(specifiedModel)}`);
   return specifiedModel
 }
 
