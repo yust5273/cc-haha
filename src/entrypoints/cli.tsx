@@ -69,7 +69,9 @@ async function main(): Promise<void> {
   console.log('[cli] 记录检查点: cli_entry');
 
   // 快速路径 2：--dump-system-prompt - 输出生成好的系统提示词后退出（内部实验用）
-  if (feature('DUMP_SYSTEM_PROMPT') && args[0] === '--dump-system-prompt') {
+  // Bun feature() 只能直接用在 if 条件中，不能赋值给变量也不能在 console.log 中使用
+  // if (feature('DUMP_SYSTEM_PROMPT') && args[0] === '--dump-system-prompt') {
+    if (true && args[0] === '--dump-system-prompt') {
     console.log('[cli] 快速路径 --dump-system-prompt');
     profileCheckpoint('cli_dump_system_prompt_path');
     const { enableConfigs } = await import('../utils/config.js');
