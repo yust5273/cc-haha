@@ -289,6 +289,144 @@ claude -p "提取这个JSON" --output-format json
  优雅退出 → process.exit(0)
 ```
 
+---
+
+## 问题解答
+
+### 1. 为什么 print 不放到快速路径？
+
+**快速路径是什么**：快速路径是给**独立 MCP 服务器**准备的，比如：
+- `--claude-in-chrome-mcp` → 启动 MCP 服务器就退出，不需要进入主 REPL
+- `--computer-use-mcp` → 同理，独立 MCP 服务器
+
+**print 模式不是独立服务**：
+- print 模式需要**全局初始化**（配置、数据库、MCP 连接、工具加载）
+- print 模式需要参数解析（`--output-format`/`--max-turns`/...），Commander 已经在 `run()` 处理好了
+- 如果放到快速路径，需要重复实现所有参数解析和初始化 → **代码重复**，难以维护
+
+**现在的设计已经够快了**：
+```typescript
+if (options.print) {
+  // 动态导入，只有 print 模式才加载
+  const { runHeadless } = await import('src/cli/print.js');
+  runHeadless(...);
+  return;
+}
+// 不是 print 才加载 React/Ink 进入交互式
+setup();
+render(<App ... />);
+```
+- 交互式启动根本不会加载 print.ts 代码
+- 已经做到按需加载，不需要放到快速路径
+
+**结论**：print 是**主程序的一种运行模式**，不是独立服务，不需要走快速路径。动态导入已经满足启动性能要求。
+
+---
+
+### 2. `isNonInteractive`、`runHeadless`、`print` 三者关系
+
+```mermaid
+graph TD
+    A[用户输入 -p/--print] --> B[--print 命令行选项]
+    B --> C[main() 计算 isNonInteractive = true]
+    C --> D[设置全局 setIsInteractive(false)]
+    D --> E[Commander 解析得到 options.print = true]
+    E --> F[默认 action 判断 if (options.print)]
+    F --> G[动态导入 src/cli/print.ts]
+    G --> H[调用 runHeadless()]
+```
+
+**三者关系总结**：
+
+| 名称 | 角色 | 说明 |
+|------|------|------|
+| `print` / `-p` | **命令行选项** | 用户指定要运行 print 模式 |
+| `isNonInteractive` | **全局标志** | 标记当前进程是非交互式，全局各处都能使用 |
+| `runHeadless` | **执行函数** | print 模式的核心执行逻辑 |
+
+所以：
+- `print` 选项 → 导致 `isNonInteractive = true` → 最后调用 `runHeadless()`
+- 层层递进，职责清晰：**用户选项 → 全局标志 → 执行函数**
+
+---
+
+### 3. process 自己的信号处理器有什么特殊之处
+
+Node.js `process` 是**全局事件总线**，它的信号处理有这些特殊点：
+
+| 特性 | 说明 |
+|------|------|
+| **注册顺序 = 执行顺序** | 先注册 → 先执行。`main.ts` 在程序最开始注册，所以一定先执行 |
+| **`process.exit()` 是同步** | 调用了就立即退出，后面注册的监听器**永远不会执行** |
+| **多个监听器都会执行** | 默认 Node.js 会按顺序执行所有监听器，除非有人调用 `process.exit()` |
+
+**问题根源**：
+- `main.ts` 先注册 SIGINT → 如果 `main.ts` 直接调用 `process.exit()`
+- `print.ts` 的监听器**已经注册但还没执行** → 进程已经退出了
+- 结果：`print.ts` 没法中止 API 请求 → 资源泄漏
+
+**解决方法**：
+```typescript
+if (process.argv.includes('-p')) {
+  return; // 跳过，让 print.ts 自己的监听器执行
+}
+process.exit(0);
+```
+这就是注释说的 **"避免 synchronous process.exit() 抢占"**。
+
+---
+
+### 4. 设计师/架构师角度理解这个设计
+
+站在设计师视角，这个设计体现了几个重要的架构设计原则：
+
+#### ① **按需加载，代码分割**
+```typescript
+// 只有 print 模式才加载 print.ts
+const { runHeadless } = await import('src/cli/print.js');
+```
+- 交互式启动不需要 print 代码 → 不加载 → 启动更快
+- 做到了**用什么加载什么**，不浪费用户时间
+
+#### ② **责任分离，谁负责谁处理**
+- SIGINT 中止 API → print 需要这个能力 → print 自己注册监听器
+- main 只处理交互式 → 认出 print 就跳过，不抢
+- **单一职责原则**：每个人只干自己擅长的，特殊情况交给特殊处理
+
+#### ③ **理解平台细节**
+- 知道 Node.js 事件监听器按注册顺序执行
+- 知道 `process.exit()` 同步调用会让后续监听器不执行
+- 这种边缘细节，新手容易踩坑，有经验的设计师会提前想到
+
+#### ④ **复用现有基础设施**
+- print 复用所有全局初始化 (`init()` / MCP / 工具 / 权限)
+- 不需要重复写一遍，只加差异部分
+- **DRY 原则**：不要重复你自己
+
+#### ⑤ **理解用户场景**
+- print 场景就是脚本/管道/自动化 → 不需要信任弹窗 → 跳过信任
+- 完美适配 Unix 哲学："写和其他程序合作的程序" → 支持管道
+
+---
+
+## 总结链路图
+
+```
+ 命令行
+   ↓
+ cli.tsx → 快速路径不命中 → [main.tsx main()](src/main.tsx#L585)
+   ↓
+ 检测 [isNonInteractive = true](src/main.tsx#L797-L803) (因为 -p)
+   ↓
+ [Commander preAction](src/main.tsx#L1029-L1088) → [init()](src/main.tsx) 全局初始化
+   ↓
+ 默认 action → options.print = true → 动态导入 [src/cli/print.ts](src/cli/print.ts)
+   ↓
+ [runHeadless()](src/cli/print.ts) → 处理提示词 → 循环 API/工具调用 → 输出结果
+   ↓
+ 优雅退出 → process.exit(0)
+```
+
 整个链路设计特点：
 - **按需加载**：只有进入 print 模式才加载 print.ts 代码
 - **正确信号处理**：让 print 自己处理 SIGINT，能正确中止 API 请求
